@@ -101,6 +101,8 @@ set(OEVIBE_SOURCES
     src/Engine.cpp
     src/EngineRegistry.cpp
     src/engines/Builtins.cpp
+    src/core/MolFuncSession.cpp
+    src/OEAdapters.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
