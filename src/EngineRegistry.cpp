@@ -33,21 +33,23 @@ void EngineRegistry::Register(std::shared_ptr<Engine> engine, bool replace) {
     if (is_builtin_engine_name(name)) {
         throw OptionsError("engine name '" + name + "' is reserved for a built-in engine");
     }
-    // Declared before the lock so a replaced engine is destroyed after the lock is released; its
+    // Both owners are declared before the lock so that an engine this call releases is destroyed
+    // after the lock is released, on every path including an exception from ``push_back``; its
     // destructor can be foreign code (see ``EngineRegistry::Entry``).
+    Entry incoming{name, std::move(engine)};
     std::shared_ptr<Engine> replaced;
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = std::find_if(engines_.begin(), engines_.end(),
                                  [&](const Entry& entry) { return entry.name == name; });
     if (it == engines_.end()) {
-        engines_.push_back({name, std::move(engine)});
+        engines_.push_back(std::move(incoming));
         return;
     }
     if (!replace) {
         throw OptionsError("an engine named '" + name + "' is already registered");
     }
     replaced = std::move(it->engine);
-    it->engine = std::move(engine);
+    it->engine = std::move(incoming.engine);
 }
 
 void EngineRegistry::RegisterBuiltin(std::shared_ptr<Engine> engine) {
@@ -55,8 +57,10 @@ void EngineRegistry::RegisterBuiltin(std::shared_ptr<Engine> engine) {
         throw OptionsError("cannot register a null engine");
     }
     std::string name = engine->GetName();
+    // Built before the lock for the same reason as in ``Register``.
+    Entry incoming{std::move(name), std::move(engine)};
     std::lock_guard<std::mutex> lock(mutex_);
-    engines_.push_back({std::move(name), std::move(engine)});
+    engines_.push_back(std::move(incoming));
 }
 
 std::shared_ptr<Engine> EngineRegistry::Find(const std::string& name) const {

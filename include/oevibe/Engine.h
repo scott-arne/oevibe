@@ -1,6 +1,7 @@
 #ifndef OEVIBE_ENGINE_H
 #define OEVIBE_ENGINE_H
 
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -67,9 +68,11 @@ struct EvaluationRequest {
 };
 
 /// Engine output in spec 3.1 units and dense atom order. An empty vector means absent; each
-/// requested quantity is present and nothing else is.
+/// requested quantity is present and nothing else is. ``energy`` has no meaningful default, so
+/// it starts as NaN and ``validate_evaluation`` rejects an engine that never set it.
 struct Evaluation {
-    double energy = 0.0;                   ///< kcal/mol
+    /// kcal/mol; must be set.
+    double energy = std::numeric_limits<double>::quiet_NaN();
     std::vector<double> gradient;          ///< 3N, kcal/mol/Angstrom
     std::vector<double> hessian;           ///< 9N^2 row-major, kcal/mol/Angstrom^2
     std::vector<double> charges;           ///< N, e

@@ -116,13 +116,25 @@ TEST(EngineTest, ValidateEvaluationChecksShapesAndPresence) {
     EvaluationRequest bonds;
     bonds.properties = static_cast<unsigned>(Property::BOND_ORDERS);
     Evaluation bad_bond;
+    bad_bond.energy = 0.0;
     bad_bond.bond_orders = {{1, 2, 1.0}};
     EXPECT_TRUE(mentions(validate_evaluation(bad_bond, bonds, 2), "bond"));
 
     EvaluationRequest orbitals;
     orbitals.properties = static_cast<unsigned>(Property::ORBITAL_ENERGIES);
     Evaluation unsorted;
+    unsorted.energy = 0.0;
     unsorted.orbital_energies = {1.0, -1.0};
     unsorted.homo_index = 0;
     EXPECT_TRUE(mentions(validate_evaluation(unsorted, orbitals, 2), "orbital"));
+}
+
+// A default Evaluation, such as one a foreign engine returns without filling in, must not pass
+// as a 0 kcal/mol result.
+TEST(EngineTest, ValidateEvaluationRejectsAnUnsetEnergy) {
+    EXPECT_TRUE(mentions(validate_evaluation(Evaluation{}, EvaluationRequest{}, 2), "energy"));
+
+    Evaluation explicit_zero;
+    explicit_zero.energy = 0.0;
+    EXPECT_EQ(validate_evaluation(explicit_zero, EvaluationRequest{}, 2), "");
 }

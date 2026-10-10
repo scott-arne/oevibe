@@ -176,7 +176,7 @@ std::string validate_evaluation(const Evaluation& evaluation, const EvaluationRe
                                 unsigned num_atoms) {
     const std::size_t n = num_atoms;
     if (!std::isfinite(evaluation.energy)) {
-        return "energy is not finite";
+        return "energy was not set or is not finite";
     }
     for (const std::string& problem :
          {check_vector(request.gradient, evaluation.gradient, 3 * n, "gradient"),
