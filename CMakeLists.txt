@@ -94,6 +94,7 @@ set(OEVIBE_SOURCES
     src/Method.cpp
     src/Preset.cpp
     src/Solvent.cpp
+    src/Constraints.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
