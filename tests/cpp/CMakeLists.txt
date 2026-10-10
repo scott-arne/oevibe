@@ -18,6 +18,7 @@ add_executable(oevibe_tests
     test_preset.cpp
     test_solvent.cpp
     test_constraints.cpp
+    test_options.cpp
 )
 
 target_link_libraries(oevibe_tests
