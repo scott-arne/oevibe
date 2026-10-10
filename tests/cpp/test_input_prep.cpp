@@ -69,6 +69,46 @@ TEST(InputPrepTest, ChargeAndMultiplicity) {
     EXPECT_THROW(detail::prepare_input(ethanol, bad_spin), InputError);
 }
 
+TEST(InputPrepTest, ImplicitHydrogensCountTowardTheElectrons) {
+    // Methylamine has five implicit hydrogens: without them the electron count would be odd.
+    OEChem::OEMol mol = test::make_conformers("CN");
+    OEChem::OESuppressHydrogens(mol);
+    ASSERT_TRUE(OEChem::OEHasImplicitHydrogens(mol));
+    const detail::PreparedInput prepared = detail::prepare_input(mol, CalculationOptions());
+    EXPECT_EQ(prepared.charge, 0);
+    EXPECT_EQ(prepared.multiplicity, 1u);
+}
+
+TEST(InputPrepTest, FailedPreparationLeavesTheMoleculeUnchanged) {
+    OEChem::OEMol mol = test::make_conformers("CCO");
+    OEChem::OESuppressHydrogens(mol);
+    ASSERT_EQ(mol.NumAtoms(), 3u);
+    CalculationOptions bad_spin;
+    bad_spin.SetMultiplicity(2);
+    EXPECT_THROW(detail::prepare_input(mol, bad_spin), InputError);
+    EXPECT_TRUE(OEChem::OEHasImplicitHydrogens(mol));
+    EXPECT_EQ(mol.NumAtoms(), 3u);
+}
+
+TEST(InputPrepTest, RejectsAnyConformerThatIsNot3D) {
+    OEChem::OEMol mol = test::make_conformers("CCCCO", 3);
+    ASSERT_GT(mol.NumConfs(), 1u);
+    const unsigned active_index = mol.GetActive()->GetIdx();
+    bool flattened = false;
+    for (OESystem::OEIter<OEChem::OEConfBase> conf = mol.GetConfs(); conf; ++conf) {
+        if (conf->GetIdx() != active_index) {
+            conf->SetDimension(2);
+            flattened = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(flattened);
+    // The molecule-level dimension follows the active conformer, so only a per-conformer check
+    // can see the flattened one.
+    ASSERT_EQ(mol.GetDimension(), 3u);
+    EXPECT_THROW(detail::prepare_input(mol, CalculationOptions()), InputError);
+}
+
 // Spike S3 showed OEAddExplicitHydrogens places hydrogens in every conformer.
 TEST(InputPrepTest, AddsHydrogensToEveryConformer) {
     OEChem::OEMol mol = test::make_conformers("CCCCO", 3);

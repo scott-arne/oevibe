@@ -14,6 +14,56 @@ namespace {
 
 constexpr unsigned NO_INDEX = std::numeric_limits<unsigned>::max();
 
+OEChem::OEAtomBase* other_neighbor(const OEChem::OEAtomBase* atom,
+                                   const OEChem::OEAtomBase* excluded) {
+    for (OESystem::OEIter<OEChem::OEAtomBase> nbr = atom->GetAtoms(); nbr; ++nbr) {
+        if (nbr->GetIdx() != excluded->GetIdx()) {
+            return nbr;
+        }
+    }
+    return nullptr;
+}
+
+// Copies tetrahedral and cis/trans stereo onto the snapshot. OpenEye stores stereo relative to
+// neighbor atoms, so this runs after every bond exists and maps each neighbor to its copy. The
+// input's own stereo is copied, rather than perceived from the 3D coordinates, so the snapshot
+// never specifies a center that the input left unspecified.
+void copy_stereo(const OEChem::OEMolBase& mol, const std::vector<unsigned>& dense_of_oe,
+                 const std::vector<OEChem::OEAtomBase*>& atom_copies,
+                 const std::vector<OEChem::OEBondBase*>& bond_copies) {
+    const auto copy_of = [&](const OEChem::OEAtomBase* atom) {
+        return atom_copies[dense_of_oe[atom->GetIdx()]];
+    };
+    for (OESystem::OEIter<OEChem::OEAtomBase> atom = mol.GetAtoms(); atom; ++atom) {
+        if (!atom->HasStereoSpecified(OEChem::OEAtomStereo::Tetrahedral)) {
+            continue;
+        }
+        std::vector<OEChem::OEAtomBase*> nbrs;
+        std::vector<OEChem::OEAtomBase*> nbr_copies;
+        for (OESystem::OEIter<OEChem::OEAtomBase> nbr = atom->GetAtoms(); nbr; ++nbr) {
+            nbrs.push_back(nbr);
+            nbr_copies.push_back(copy_of(nbr));
+        }
+        copy_of(atom)->SetStereo(nbr_copies, OEChem::OEAtomStereo::Tetrahedral,
+                                 atom->GetStereo(nbrs, OEChem::OEAtomStereo::Tetrahedral));
+    }
+    std::size_t position = 0;
+    for (OESystem::OEIter<OEChem::OEBondBase> bond = mol.GetBonds(); bond; ++bond, ++position) {
+        if (!bond->HasStereoSpecified(OEChem::OEBondStereo::CisTrans)) {
+            continue;
+        }
+        OEChem::OEAtomBase* bgn_nbr = other_neighbor(bond->GetBgn(), bond->GetEnd());
+        OEChem::OEAtomBase* end_nbr = other_neighbor(bond->GetEnd(), bond->GetBgn());
+        if (bgn_nbr == nullptr || end_nbr == nullptr) {
+            continue;
+        }
+        const std::vector<OEChem::OEAtomBase*> reference = {bgn_nbr, end_nbr};
+        bond_copies[position]->SetStereo(
+            {copy_of(bgn_nbr), copy_of(end_nbr)}, OEChem::OEBondStereo::CisTrans,
+            bond->GetStereo(reference, OEChem::OEBondStereo::CisTrans));
+    }
+}
+
 }  // namespace
 
 MolecularSystem::MolecularSystem(const OEChem::OEMolBase& mol, int charge, unsigned multiplicity,
@@ -36,12 +86,15 @@ MolecularSystem::MolecularSystem(const OEChem::OEMolBase& mol, int charge, unsig
         copy->SetAromatic(atom->IsAromatic());
         copies.push_back(copy);
     }
+    std::vector<OEChem::OEBondBase*> bond_copies;
     for (OESystem::OEIter<OEChem::OEBondBase> bond = mol.GetBonds(); bond; ++bond) {
         OEChem::OEBondBase* copy =
             snapshot_.NewBond(copies[dense_of_oe_[bond->GetBgnIdx()]],
                               copies[dense_of_oe_[bond->GetEndIdx()]], bond->GetOrder());
         copy->SetAromatic(bond->IsAromatic());
+        bond_copies.push_back(copy);
     }
+    copy_stereo(mol, dense_of_oe_, copies, bond_copies);
     OEChem::OEFindRingAtomsAndBonds(snapshot_);
     snapshot_.SetTitle(mol.GetTitle());
 

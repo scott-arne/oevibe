@@ -3,6 +3,8 @@
 #include <oechem.h>
 
 #include <cmath>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "oevibe/Error.h"
@@ -45,6 +47,27 @@ TEST(MolecularSystemTest, KeepsEveryConformerInOrder) {
         std::vector<double> coords(3 * mol.GetMaxAtomIdx());
         conf->GetCoords(coords.data());
         EXPECT_EQ(system.ToOELayout(system.GetConformerCoordinates(position)), coords);
+    }
+}
+
+TEST(MolecularSystemTest, SnapshotKeepsTetrahedralAndCisTransStereo) {
+    // The marker guards against a vacuous pass when the input carries no stereo to begin with.
+    const std::vector<std::pair<std::string, std::string>> cases = {{"F[C@](Cl)(Br)I", "@"},
+                                                                    {"C/C=C/C", "/"}};
+    for (const auto& [smiles, marker] : cases) {
+        const OEChem::OEMol mol = test::make_conformers(smiles);
+        std::string expected;
+        OEChem::OECreateIsoSmiString(expected, mol);
+        ASSERT_NE(expected.find(marker), std::string::npos) << expected;
+        const MolecularSystem system(mol, 0, 1);
+        std::string actual;
+        OEChem::OECreateIsoSmiString(actual, system.GetMolecule());
+        EXPECT_EQ(actual, expected) << smiles;
+        OEChem::OEMol copy;
+        system.CopyMolecule(copy);
+        std::string copied;
+        OEChem::OECreateIsoSmiString(copied, copy);
+        EXPECT_EQ(copied, expected) << smiles;
     }
 }
 

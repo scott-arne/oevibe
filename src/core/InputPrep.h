@@ -19,9 +19,11 @@ struct PreparedInput {
 };
 
 /// Applies spec 6.1 to the caller's molecule, adding explicit hydrogens in place when allowed.
-/// :raises InputError: For an empty or non-3D molecule, implicit hydrogens that may not be
-///     added, a failed hydrogen addition, or a charge and multiplicity that the electron count
-///     cannot satisfy.
+/// Every check runs before the hydrogens are added, so an input rejected by a check is left
+/// unchanged.
+/// :raises InputError: For an empty molecule, a conformer that is not 3D, implicit hydrogens
+///     that may not be added, a failed hydrogen addition, or a charge and multiplicity that the
+///     electron count cannot satisfy.
 PreparedInput prepare_input(OEChem::OEMolBase& mol, const CalculationOptions& options);
 
 }  // namespace detail
