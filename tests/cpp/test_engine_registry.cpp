@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <thread>
@@ -10,6 +11,23 @@
 #include "test_support.h"
 
 using namespace OEVIBE;
+
+namespace {
+
+/// Counts ``GetName`` calls so tests can tell when the registry runs engine code.
+class NameCountingEngine : public test::FakeEngine {
+public:
+    using test::FakeEngine::FakeEngine;
+
+    std::string GetName() const override {
+        ++name_calls;
+        return FakeEngine::GetName();
+    }
+
+    mutable std::atomic<int> name_calls{0};
+};
+
+}  // namespace
 
 TEST(EngineRegistryTest, RegisterFindAndList) {
     auto engine = test::register_fake("fake-registry-basic");
@@ -88,4 +106,24 @@ TEST(EngineRegistryTest, ConcurrentRegisterFindAndListAreSafe) {
     for (int t = 0; t < THREAD_COUNT; ++t) {
         EXPECT_NE(EngineRegistry::Instance().Find("fake-concurrent-" + std::to_string(t)), nullptr);
     }
+}
+
+// A Python engine's GetName needs the GIL, so calling it while holding the registry mutex can
+// deadlock against a thread that holds the GIL and waits for the mutex (Plan C). Lookups must
+// therefore compare names cached at registration.
+TEST(EngineRegistryTest, LookupsDoNotCallEngineCodeUnderTheLock) {
+    auto counted = std::make_shared<NameCountingEngine>("fake-name-counted");
+    EngineRegistry::Instance().Register(counted, true);
+    test::register_fake("fake-name-counted-other");
+    counted->name_calls = 0;
+
+    EXPECT_EQ(EngineRegistry::Instance().Find("fake-name-counted"), counted);
+    EXPECT_NE(EngineRegistry::Instance().Find("fake-name-counted-other"), nullptr);
+    EXPECT_EQ(EngineRegistry::Instance().Find("no-such-engine"), nullptr);
+    EXPECT_FALSE(EngineRegistry::Instance().List().empty());
+    EXPECT_EQ(counted->name_calls.load(), 0);
+}
+
+TEST(EngineRegistryTest, RegisterBuiltinRejectsANullEngine) {
+    EXPECT_THROW(EngineRegistry::Instance().RegisterBuiltin(nullptr), OptionsError);
 }

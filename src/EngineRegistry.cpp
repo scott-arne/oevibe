@@ -33,34 +33,47 @@ void EngineRegistry::Register(std::shared_ptr<Engine> engine, bool replace) {
     if (is_builtin_engine_name(name)) {
         throw OptionsError("engine name '" + name + "' is reserved for a built-in engine");
     }
+    // Declared before the lock so a replaced engine is destroyed after the lock is released; its
+    // destructor can be foreign code (see ``EngineRegistry::Entry``).
+    std::shared_ptr<Engine> replaced;
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = std::find_if(engines_.begin(), engines_.end(),
-                                 [&](const auto& item) { return item->GetName() == name; });
+                                 [&](const Entry& entry) { return entry.name == name; });
     if (it == engines_.end()) {
-        engines_.push_back(std::move(engine));
+        engines_.push_back({name, std::move(engine)});
         return;
     }
     if (!replace) {
         throw OptionsError("an engine named '" + name + "' is already registered");
     }
-    *it = std::move(engine);
+    replaced = std::move(it->engine);
+    it->engine = std::move(engine);
 }
 
 void EngineRegistry::RegisterBuiltin(std::shared_ptr<Engine> engine) {
+    if (!engine) {
+        throw OptionsError("cannot register a null engine");
+    }
+    std::string name = engine->GetName();
     std::lock_guard<std::mutex> lock(mutex_);
-    engines_.push_back(std::move(engine));
+    engines_.push_back({std::move(name), std::move(engine)});
 }
 
 std::shared_ptr<Engine> EngineRegistry::Find(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = std::find_if(engines_.begin(), engines_.end(),
-                                 [&](const auto& item) { return item->GetName() == name; });
-    return it == engines_.end() ? nullptr : *it;
+                                 [&](const Entry& entry) { return entry.name == name; });
+    return it == engines_.end() ? nullptr : it->engine;
 }
 
 std::vector<std::shared_ptr<Engine>> EngineRegistry::List() const {
+    std::vector<std::shared_ptr<Engine>> engines;
     std::lock_guard<std::mutex> lock(mutex_);
-    return engines_;
+    engines.reserve(engines_.size());
+    for (const Entry& entry : engines_) {
+        engines.push_back(entry.engine);
+    }
+    return engines;
 }
 
 std::shared_ptr<Engine> EngineRegistry::ResolveForMethod(const Method& method) const {
