@@ -1,0 +1,89 @@
+[build-system]
+requires = ["scikit-build-core>=0.8", "swig>=4.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "oevibe"
+version = "0.1.0"
+description = "A C++/Python library for energy calculations with OpenEye molecules"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [
+    { name = "Scott Johnson", email = "scott.johnson@bms.com" },
+]
+keywords = ["chemistry", "openeye", "swig"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+]
+dependencies = [
+    "openeye-toolkits>=2026.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "vrzn>=0.1.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+python_files = ["test_*.py"]
+addopts = "-v"
+
+[tool.scikit-build]
+cmake.version = ">=3.21"
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+build.targets = ["oevibe_python"]
+wheel.install-dir = "."
+logging.level = "INFO"
+strict-config = false
+wheel.py-api = "cp312"
+wheel.exclude = ["**.pyc", "**/__pycache__", "*.a", "CMakeFiles/**"]
+
+[tool.scikit-build.cmake.define]
+OEVIBE_BUILD_TESTS = "OFF"
+OEVIBE_BUILD_PYTHON = "ON"
+OPENEYE_USE_SHARED = "ON"
+OEVIBE_USE_STABLE_ABI = "ON"
+OEVIBE_UNIVERSAL2 = "OFF"
+
+# =============================================================================
+# TOML-driven build configuration for scripts/build_python.py
+# =============================================================================
+# This section is read by build_python.py to parameterize the build.
+# The script itself is identical across all projects — only this config changes.
+[tool.oe-build]
+package-name = "oevibe"
+cmake-test-flag = "OEVIBE_BUILD_TESTS"
+rpath-strategy = "platform"  # "platform" = @loader_path/../openeye/libs/{platform}, "simple" = @loader_path
+
+# OpenEye libraries that are expected to be missing from delocate
+# (they are provided at runtime by openeye-toolkits, not bundled in the wheel)
+expected-missing-libs = [
+    "liboechem", "liboesystem", "liboeplatform",
+    "liboemath", "libzstd",
+]
+
+# Additional CMake defines passed during wheel build (beyond the standard ones)
+[tool.oe-build.extra-cmake-defines]
+
+# =============================================================================
+# Pyright / Pylance configuration (type checking and editor analysis)
+# https://microsoft.github.io/pyright/#/configuration
+# =============================================================================
+# Restrict analysis to this project's Python source so Pylance does not crawl
+# build artifacts, SWIG-generated output, or the interpreter's site-packages.
+[tool.pyright]
+include = ["python", "tests/python"]
+exclude = [
+    "**/__pycache__",
+    "**/.*",
+    "build",
+    "build-*",
+    "dist",
+    "**/*.egg-info",
+]
+
