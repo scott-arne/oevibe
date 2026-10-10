@@ -19,12 +19,15 @@ add_executable(oevibe_tests
     test_solvent.cpp
     test_constraints.cpp
     test_options.cpp
+    test_molecular_system.cpp
+    test_input_prep.cpp
 )
 
 target_link_libraries(oevibe_tests
     PRIVATE
         oevibe
         oevibe_eigen
+        OpenEye::OEOmega2
         GTest::gtest
 )
 

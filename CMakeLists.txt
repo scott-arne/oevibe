@@ -96,6 +96,8 @@ set(OEVIBE_SOURCES
     src/Solvent.cpp
     src/Constraints.cpp
     src/Options.cpp
+    src/MolecularSystem.cpp
+    src/core/InputPrep.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
