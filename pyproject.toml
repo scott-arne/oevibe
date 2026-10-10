@@ -20,9 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: C++",
 ]
-dependencies = [
-    "openeye-toolkits>=2026.1",
-]
+dependencies = ["openeye-toolkits>=2026.1", "numpy>=2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "vrzn>=0.1.0"]
@@ -30,7 +28,10 @@ dev = ["pytest>=7.0", "vrzn>=0.1.0"]
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 python_files = ["test_*.py"]
-addopts = "-v"
+addopts = "-v -m \"not acceptance\""
+markers = [
+    "acceptance: reference benchmark against the xtb binary (opt-in with -m acceptance)",
+]
 
 [tool.scikit-build]
 cmake.version = ">=3.21"
@@ -63,8 +64,10 @@ rpath-strategy = "platform"  # "platform" = @loader_path/../openeye/libs/{platfo
 # OpenEye libraries that are expected to be missing from delocate
 # (they are provided at runtime by openeye-toolkits, not bundled in the wheel)
 expected-missing-libs = [
-    "liboechem", "liboesystem", "liboeplatform",
-    "liboemath", "libzstd",
+    "liboechem", "liboesystem", "liboeplatform", "liboemath", "libzstd",
+    "liboebio", "liboegrid", "liboeszybki", "liboequacpac", "liboeff", "liboeamber",
+    "liboesheffield", "liboeam1bcc", "liboeam1", "liboesmirnoff", "liboemmff",
+    "liboespicoli", "liboezap", "liboeshape", "liboehermite", "liboemolpotential", "liboeopt",
 ]
 
 # Additional CMake defines passed during wheel build (beyond the standard ones)
@@ -87,3 +90,24 @@ exclude = [
     "**/*.egg-info",
 ]
 
+[tool.ruff]
+src = [".", "python"]
+extend-exclude = [
+    "python/oevibe/oevibe.py", "python/oevibe/_build_info.py", "build", "build-*", "spikes",
+    "scripts",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The library-compat shims are shared verbatim with the sibling cmake-openeye projects.
+"python/oevibe/__init__.py" = ["E402", "PIE810"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = ["python/oevibe/oevibe\\.py$", "python/oevibe/_build_info\\.py$", "^build", "^spikes/"]
+
+# The exclude patterns skip discovery only; mypy still follows imports into the generated proxy
+# and build-info modules, so their errors are silenced explicitly.
+[[tool.mypy.overrides]]
+module = ["oevibe.oevibe", "oevibe._build_info"]
+ignore_errors = true

@@ -8,15 +8,29 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
+# One executable; each component adds its test_<component>.cpp here.
 add_executable(oevibe_tests
+    test_main.cpp
     test_oevibe.cpp
 )
 
 target_link_libraries(oevibe_tests
     PRIVATE
         oevibe
-        GTest::gtest_main
+        oevibe_eigen
+        GTest::gtest
 )
 
+# Tests reach internal headers under src/ to test components directly.
+target_include_directories(oevibe_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+
 include(GoogleTest)
-gtest_discover_tests(oevibe_tests)
+
+# The OpenEye static libraries are not instrumented, so AddressSanitizer reports false
+# container-overflow errors from libc++ containers inside OpenEye frames. Only builds compiled
+# with -fsanitize=address get the option.
+set(OEVIBE_TEST_PROPERTIES "")
+if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=[^ ]*address")
+    set(OEVIBE_TEST_PROPERTIES PROPERTIES ENVIRONMENT "ASAN_OPTIONS=detect_container_overflow=0")
+endif()
+gtest_discover_tests(oevibe_tests DISCOVERY_TIMEOUT 120 ${OEVIBE_TEST_PROPERTIES})

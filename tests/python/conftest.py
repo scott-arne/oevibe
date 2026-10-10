@@ -4,6 +4,17 @@ import pytest
 
 pytest.importorskip("openeye.oechem", reason="OpenEye Toolkits not installed")
 
+from oevibe import _build_info
+
+# The module must share the openeye-toolkits wheel's OpenEye runtime; a static copy carries a
+# second runtime whose generic-data tag registry relabels SD data on every molecule passed in.
+if _build_info.OPENEYE_LIBRARY_TYPE != "SHARED":
+    pytest.exit(
+        "python/oevibe/_oevibe.so is not linked to the openeye-toolkits shared libraries; "
+        "build it with: cmake --preset python && cmake --build --preset python",
+        returncode=pytest.ExitCode.USAGE_ERROR,
+    )
+
 
 @pytest.fixture
 def aspirin_mol():

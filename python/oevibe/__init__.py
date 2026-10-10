@@ -55,9 +55,7 @@ def _runtime_shared_library_names(lib_names):
     return [
         lib_name
         for lib_name in lib_names
-        if ".so" in lib_name
-        or lib_name.endswith(".dylib")
-        or lib_name.endswith(".dll")
+        if ".so" in lib_name or lib_name.endswith(".dylib") or lib_name.endswith(".dll")
     ]
 
 
@@ -279,12 +277,12 @@ def _ensure_library_compat():
     except ImportError:
         return False
 
-    if getattr(_build_info, 'OPENEYE_LIBRARY_TYPE', 'STATIC') != 'SHARED':
+    if getattr(_build_info, "OPENEYE_LIBRARY_TYPE", "STATIC") != "SHARED":
         return False
 
-    expected_libs = set(_runtime_shared_library_names(
-        getattr(_build_info, 'OPENEYE_EXPECTED_LIBS', [])
-    ))
+    expected_libs = set(
+        _runtime_shared_library_names(getattr(_build_info, "OPENEYE_EXPECTED_LIBS", []))
+    )
     expected_libs.update(_extension_runtime_library_names(os.path.dirname(__file__)))
     expected_libs = sorted(expected_libs)
     if not expected_libs:
@@ -297,7 +295,7 @@ def _ensure_library_compat():
     if not os.path.isdir(oe_lib_dir):
         return False
 
-    build_version = getattr(_build_info, 'OPENEYE_BUILD_VERSION', None)
+    build_version = getattr(_build_info, "OPENEYE_BUILD_VERSION", None)
     runtime_version = _runtime_openeye_version()
     cache_dir = (
         _user_cache_root()
@@ -433,7 +431,8 @@ def _preload_shared_libs():
     """
     import ctypes
     import sys
-    if sys.platform not in ('linux', 'darwin'):
+
+    if sys.platform not in ("linux", "darwin"):
         return
 
     try:
@@ -441,11 +440,11 @@ def _preload_shared_libs():
     except ImportError:
         return
 
-    if getattr(_build_info, 'OPENEYE_LIBRARY_TYPE', 'STATIC') != 'SHARED':
+    if getattr(_build_info, "OPENEYE_LIBRARY_TYPE", "STATIC") != "SHARED":
         return
 
     expected_libs = _runtime_shared_library_names(
-        getattr(_build_info, 'OPENEYE_EXPECTED_LIBS', [])
+        getattr(_build_info, "OPENEYE_EXPECTED_LIBS", [])
     )
     if not expected_libs:
         return
@@ -472,6 +471,7 @@ def _preload_shared_libs():
             except OSError:
                 pass
 
+
 def _preload_bundled_libs():
     """Preload libraries bundled by auditwheel from the .libs directory.
 
@@ -486,21 +486,23 @@ def _preload_bundled_libs():
     ``RTLD_GLOBAL`` to avoid polluting the global symbol namespace.
     """
     import sys
-    if sys.platform != 'linux':
+
+    if sys.platform != "linux":
         return
 
     import ctypes
+
     pkg_name = __name__
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     site_dir = os.path.dirname(pkg_dir)
-    for libs_name in (f'{pkg_name}.libs', f'.{pkg_name}.libs'):
+    for libs_name in (f"{pkg_name}.libs", f".{pkg_name}.libs"):
         libs_dir = os.path.join(site_dir, libs_name)
         if not os.path.isdir(libs_dir):
             continue
         remaining = [
             os.path.join(libs_dir, f)
             for f in sorted(os.listdir(libs_dir))
-            if '.so' in f
+            if ".so" in f
         ]
         while remaining:
             failed = []
@@ -521,32 +523,33 @@ def _check_openeye_version():
     except ImportError:
         return
 
-    if getattr(_build_info, 'OPENEYE_LIBRARY_TYPE', 'STATIC') != 'SHARED':
+    if getattr(_build_info, "OPENEYE_LIBRARY_TYPE", "STATIC") != "SHARED":
         return
 
-    build_version = getattr(_build_info, 'OPENEYE_BUILD_VERSION', None)
+    build_version = getattr(_build_info, "OPENEYE_BUILD_VERSION", None)
     if not build_version:
         return
 
     try:
         from importlib import metadata
+
         runtime_version = metadata.version("openeye-toolkits")
     except metadata.PackageNotFoundError:
         warnings.warn(
             "openeye-toolkits package not found. "
             "Install with: pip install openeye-toolkits",
-            ImportWarning
+            ImportWarning,
         )
         return
 
-    build_parts = build_version.split('.')[:2]
-    runtime_parts = runtime_version.split('.')[:2]
+    build_parts = build_version.split(".")[:2]
+    runtime_parts = runtime_version.split(".")[:2]
     if build_parts != runtime_parts:
         warnings.warn(
             f"OpenEye version mismatch: oevibe was built with "
             f"OpenEye Toolkits {build_version} but runtime has {runtime_version}. "
             f"This may cause compatibility issues.",
-            RuntimeWarning
+            RuntimeWarning,
         )
 
 

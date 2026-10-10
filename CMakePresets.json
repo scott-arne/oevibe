@@ -1,10 +1,6 @@
 {
     "version": 6,
-    "cmakeMinimumRequired": {
-        "major": 3,
-        "minor": 21,
-        "patch": 0
-    },
+    "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
     "configurePresets": [
         {
             "name": "release",
@@ -12,7 +8,8 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "OPENEYE_ROOT": {"type": "PATH", "value": "/Users/johnss51/Support/openeye/openeye/toolkits"},
-                "Python3_EXECUTABLE": {"type": "PATH", "value": "/Users/johnss51/Applications/micromamba/envs/main/bin/python"}
+                "Python3_EXECUTABLE": {"type": "PATH", "value": "${sourceDir}/.venv/bin/python"},
+                "OEVIBE_BUILD_PYTHON": "OFF"
             }
         },
         {
@@ -21,12 +18,56 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "OPENEYE_ROOT": {"type": "PATH", "value": "/Users/johnss51/Support/openeye/openeye/toolkits"},
-                "Python3_EXECUTABLE": {"type": "PATH", "value": "/Users/johnss51/Applications/micromamba/envs/main/bin/python"}
+                "Python3_EXECUTABLE": {"type": "PATH", "value": "${sourceDir}/.venv/bin/python"},
+                "OEVIBE_BUILD_PYTHON": "OFF"
+            }
+        },
+        {
+            "name": "python",
+            "binaryDir": "${sourceDir}/build-python",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "OPENEYE_ROOT": {"type": "PATH", "value": "/Users/johnss51/Support/openeye/openeye/toolkits"},
+                "Python3_EXECUTABLE": {"type": "PATH", "value": "${sourceDir}/.venv/bin/python"},
+                "OPENEYE_USE_SHARED": "ON",
+                "OEVIBE_BUILD_PYTHON": "ON",
+                "OEVIBE_BUILD_TESTS": "OFF"
+            }
+        },
+        {
+            "name": "asan",
+            "binaryDir": "${sourceDir}/build-asan",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "OPENEYE_ROOT": {"type": "PATH", "value": "/Users/johnss51/Support/openeye/openeye/toolkits"},
+                "Python3_EXECUTABLE": {"type": "PATH", "value": "${sourceDir}/.venv/bin/python"},
+                "OEVIBE_BUILD_PYTHON": "OFF",
+                "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g",
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+                "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined",
+                "CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE": "PRE_TEST"
+            }
+        },
+        {
+            "name": "tsan",
+            "binaryDir": "${sourceDir}/build-tsan",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "OPENEYE_ROOT": {"type": "PATH", "value": "/Users/johnss51/Support/openeye/openeye/toolkits"},
+                "Python3_EXECUTABLE": {"type": "PATH", "value": "${sourceDir}/.venv/bin/python"},
+                "OEVIBE_BUILD_PYTHON": "OFF",
+                "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g",
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+                "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread",
+                "CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE": "PRE_TEST"
             }
         }
     ],
     "buildPresets": [
         { "name": "release", "configurePreset": "release" },
-        { "name": "debug", "configurePreset": "debug" }
+        { "name": "debug", "configurePreset": "debug" },
+        { "name": "python", "configurePreset": "python" },
+        { "name": "asan", "configurePreset": "asan" },
+        { "name": "tsan", "configurePreset": "tsan" }
     ]
 }

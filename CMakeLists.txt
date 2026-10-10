@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
 
 if(POLICY CMP0144)
     cmake_policy(SET CMP0144 NEW)
@@ -12,7 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
 option(OEVIBE_BUILD_TESTS "Build tests" ON)
-option(OEVIBE_BUILD_PYTHON "Build Python bindings" ON)
+option(OEVIBE_BUILD_PYTHON "Build Python bindings (requires shared OpenEye libraries)" OFF)
 option(OEVIBE_UNIVERSAL2 "Build universal2 binary for macOS" OFF)
 option(OEVIBE_USE_STABLE_ABI "Use Python stable ABI" ON)
 
@@ -38,6 +38,19 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(cmake_openeye)
 list(APPEND CMAKE_MODULE_PATH "${cmake_openeye_SOURCE_DIR}")
 
+# Eigen is header-only. SOURCE_SUBDIR names a directory without a CMakeLists.txt, so
+# FetchContent only downloads the sources and Eigen's own test and install targets stay out.
+FetchContent_Declare(
+    eigen
+    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+    GIT_TAG 3.4.0
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR oevibe-header-only
+)
+FetchContent_MakeAvailable(eigen)
+add_library(oevibe_eigen INTERFACE)
+target_include_directories(oevibe_eigen SYSTEM INTERFACE ${eigen_SOURCE_DIR})
+
 if(OEVIBE_BUILD_PYTHON)
     find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
     find_package(SWIG 4.0)
@@ -48,6 +61,32 @@ if(OPENEYE_USE_SHARED)
 endif()
 
 find_package(OpenEye REQUIRED)
+
+# The Python module must link the openeye-toolkits wheel's shared libraries. With static OpenEye
+# it would carry a second OpenEye runtime into the Python process, and objects passed between
+# the two runtimes have their generic data (including SD tags) relabeled, because each runtime
+# keeps its own tag registry. The check reads what FindOpenEye resolved on this configure rather
+# than the cached OpenEye_LIBRARY_TYPE, which a reconfigure would keep stale.
+if(OEVIBE_BUILD_PYTHON)
+    get_target_property(_OEVIBE_OECHEM_LOCATION OpenEye::OEChem IMPORTED_LOCATION)
+    if(NOT _OEVIBE_OECHEM_LOCATION AND CMAKE_BUILD_TYPE)
+        string(TOUPPER "${CMAKE_BUILD_TYPE}" _OEVIBE_CONFIG)
+        get_target_property(_OEVIBE_OECHEM_LOCATION OpenEye::OEChem
+            IMPORTED_LOCATION_${_OEVIBE_CONFIG})
+    endif()
+    set(_OEVIBE_OECHEM_EXTENSION "")
+    if(_OEVIBE_OECHEM_LOCATION)
+        cmake_path(GET _OEVIBE_OECHEM_LOCATION EXTENSION LAST_ONLY _OEVIBE_OECHEM_EXTENSION)
+    endif()
+    if(NOT OPENEYE_USE_SHARED
+            OR NOT "${_OEVIBE_OECHEM_EXTENSION}" STREQUAL "${CMAKE_SHARED_LIBRARY_SUFFIX}")
+        message(FATAL_ERROR "OEVIBE_BUILD_PYTHON requires the shared OpenEye libraries of the "
+            "openeye-toolkits wheel, but OPENEYE_USE_SHARED resolved to ${OPENEYE_USE_SHARED} "
+            "and OpenEye::OEChem links ${_OEVIBE_OECHEM_LOCATION}. "
+            "Configure with the python preset.")
+    endif()
+    set(OpenEye_LIBRARY_TYPE SHARED)
+endif()
 
 # Library
 set(OEVIBE_SOURCES
@@ -62,11 +101,21 @@ target_include_directories(oevibe
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# Eigen is an implementation detail of src/core; BUILD_INTERFACE keeps it out of the export.
 target_link_libraries(oevibe
     PUBLIC
         OpenEye::OEChem
+        OpenEye::OEFF
+        OpenEye::OEMMFF
+        OpenEye::OESmirnoff
+        OpenEye::OESheffield
+        OpenEye::OEQuacpac
+    PRIVATE
+        $<BUILD_INTERFACE:oevibe_eigen>
 )
 
 # Tests
