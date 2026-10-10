@@ -91,6 +91,9 @@ endif()
 # Library
 set(OEVIBE_SOURCES
     src/oevibe.cpp
+    src/Method.cpp
+    src/Preset.cpp
+    src/Solvent.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
