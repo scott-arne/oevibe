@@ -12,6 +12,8 @@ FetchContent_MakeAvailable(googletest)
 add_executable(oevibe_tests
     test_main.cpp
     test_oevibe.cpp
+    test_error.cpp
+    test_units.cpp
 )
 
 target_link_libraries(oevibe_tests

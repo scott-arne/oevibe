@@ -1,0 +1,19 @@
+#include <gtest/gtest.h>
+
+#include "oevibe/Units.h"
+
+using namespace OEVIBE;
+
+TEST(UnitsTest, CodataValues) {
+    EXPECT_DOUBLE_EQ(Units::HARTREE_TO_KCAL, 627.5094740631);
+    EXPECT_DOUBLE_EQ(Units::HARTREE_TO_EV, 27.211386245988);
+    EXPECT_DOUBLE_EQ(Units::BOHR_TO_ANGSTROM, 0.529177210903);
+    EXPECT_DOUBLE_EQ(Units::GAS_CONSTANT_KCAL, 1.98720425864083e-3);
+}
+
+TEST(UnitsTest, DerivedConversionsAreConsistent) {
+    EXPECT_NEAR(Units::ANGSTROM_TO_BOHR * Units::BOHR_TO_ANGSTROM, 1.0, 1e-15);
+    EXPECT_NEAR(Units::HARTREE_PER_BOHR_TO_KCAL_PER_ANGSTROM, 1185.8212, 1e-3);
+    EXPECT_NEAR(Units::DEGREES_TO_RADIANS * 180.0, Units::PI, 1e-15);
+    EXPECT_NEAR(Units::RADIANS_TO_DEGREES * Units::PI, 180.0, 1e-12);
+}
