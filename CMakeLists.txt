@@ -98,6 +98,9 @@ set(OEVIBE_SOURCES
     src/Options.cpp
     src/MolecularSystem.cpp
     src/core/InputPrep.cpp
+    src/Engine.cpp
+    src/EngineRegistry.cpp
+    src/engines/Builtins.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

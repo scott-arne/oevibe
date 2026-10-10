@@ -21,6 +21,8 @@ add_executable(oevibe_tests
     test_options.cpp
     test_molecular_system.cpp
     test_input_prep.cpp
+    test_engine.cpp
+    test_engine_registry.cpp
 )
 
 target_link_libraries(oevibe_tests
