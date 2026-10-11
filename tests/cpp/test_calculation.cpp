@@ -111,13 +111,23 @@ TEST(CalculationTest, EnergyOverEveryConformer) {
 }
 
 TEST(CalculationTest, GradientUsesTheOpenEyeLayout) {
-    test::register_fake("calc-gradient");
+    auto engine = test::register_fake("calc-gradient");
     OEChem::OEMol mol = test::make_gapped_methane();
+    // The fake's gradient is zero at its own reference, so displace the reference to make the
+    // gradient at the real atoms non-trivial.
+    engine->reference = MolecularSystem(mol, 0, 1).GetConformerCoordinates(0);
+    engine->reference[0] += 0.1;
     const ResultSet results = Calculation(fake_options("calc-gradient")).Gradient(mol);
     ASSERT_TRUE(results.Get(0).HasGradient());
     const std::vector<double> gradient = results.Get(0).GetGradient();
     ASSERT_EQ(gradient.size(), 18u);
     EXPECT_DOUBLE_EQ(gradient[3], 0.0);
+    // OpenEye index 0 is the carbon: its components must carry the engine's gradient.
+    EXPECT_TRUE(gradient[0] != 0.0 || gradient[1] != 0.0 || gradient[2] != 0.0);
+    // OpenEye index 1 was deleted, so its slots stay exactly zero.
+    for (std::size_t k = 3; k < 6; ++k) {
+        EXPECT_EQ(gradient[k], 0.0);
+    }
 }
 
 TEST(CalculationTest, InputErrorsComeBeforeComputation) {
@@ -146,6 +156,9 @@ TEST(CalculationTest, EngineFailuresBecomeStatuses) {
     EXPECT_EQ(results.Get(0).GetStatus(), ConformerStatus::ENGINE_ERROR);
     EXPECT_TRUE(contains(results.Get(0).GetMessage(), "gradient"));
     EXPECT_FALSE(results.HasLowest());
+    // A finite energy computed before the malformed part is kept; the malformed gradient is not.
+    EXPECT_TRUE(results.Get(0).HasEnergy());
+    EXPECT_FALSE(results.Get(0).HasGradient());
 }
 
 TEST(CalculationTest, PartialChargeWriteBackIgnoresConformerOrder) {
@@ -208,4 +221,68 @@ TEST(CalculationTest, TagsCanBeDisabled) {
     OEChem::OEMol mol = test::make_conformers("CCO");
     Calculation(options).Energy(mol);
     EXPECT_FALSE(OEChem::OEHasSDData(*conformer(mol, 0), "OEVibe.fake-method.gas.Status"));
+}
+
+TEST(CalculationTest, AccuracyKeywordOverridesThePreset) {
+    auto engine = test::register_fake("calc-accuracy");
+    KeywordSpec spec;
+    spec.name = "accuracy";
+    spec.type = KeywordType::DOUBLE;
+    engine->keyword_specs = {spec};
+    CalculationOptions options = fake_options("calc-accuracy");
+    options.SetKeyword("accuracy", "0.5");
+    OEChem::OEMol mol = test::make_conformers("CCO");
+    const ResultSet results = Calculation(options).Energy(mol);
+    EXPECT_DOUBLE_EQ(engine->last_settings.accuracy, 0.5);
+    EXPECT_EQ(results.Get(0).GetProvenance().resolved_options.at("accuracy"), "0.500000");
+}
+
+TEST(CalculationTest, FailedRerunClearsNumericTags) {
+    auto engine = test::register_fake("calc-rerun");
+    const CalculationOptions options = fake_options("calc-rerun");
+    OEChem::OEMol mol = test::make_conformers("CCO");
+    Calculation(options).Energy(mol);
+    ASSERT_TRUE(OEChem::OEHasSDData(*conformer(mol, 0), "OEVibe.fake-method.gas.Energy"));
+    ASSERT_TRUE(OEChem::OEHasSDData(*conformer(mol, 0), "OEVibe.fake-method.gas.RelativeEnergy"));
+
+    engine->mode = test::FakeMode::THROW_RUNTIME;
+    Calculation(options).Energy(mol);
+    EXPECT_EQ(OEChem::OEGetSDData(*conformer(mol, 0), "OEVibe.fake-method.gas.Status"),
+              "ENGINE_ERROR");
+    EXPECT_FALSE(OEChem::OEHasSDData(*conformer(mol, 0), "OEVibe.fake-method.gas.Energy"));
+    EXPECT_FALSE(OEChem::OEHasSDData(*conformer(mol, 0), "OEVibe.fake-method.gas.RelativeEnergy"));
+}
+
+TEST(CalculationTest, DigestCoversChargeMultiplicityAndTask) {
+    test::register_fake("calc-digest");
+    OEChem::OEMol mol = test::make_conformers("CCO");
+    const auto provenance_of = [&mol](const CalculationOptions& options, bool gradient) {
+        Calculation calc(options);
+        const ResultSet results = gradient ? calc.Gradient(mol) : calc.Energy(mol);
+        return results.Get(0).GetProvenance();
+    };
+
+    const CalculationOptions base = fake_options("calc-digest");
+    CalculationOptions charged = base;
+    charged.SetCharge(1);
+    CalculationOptions triplet = base;
+    triplet.SetMultiplicity(3);
+
+    const Provenance energy = provenance_of(base, false);
+    const Provenance gradient = provenance_of(base, true);
+    const Provenance cation = provenance_of(charged, false);
+    const Provenance high_spin = provenance_of(triplet, false);
+
+    EXPECT_NE(energy.options_digest, gradient.options_digest);
+    EXPECT_NE(energy.options_digest, cation.options_digest);
+    EXPECT_NE(energy.options_digest, high_spin.options_digest);
+
+    EXPECT_EQ(energy.resolved_options.at("charge"), "0");
+    EXPECT_EQ(energy.resolved_options.at("multiplicity"), "1");
+    EXPECT_EQ(energy.resolved_options.at("partial_charges"), "none");
+    EXPECT_EQ(energy.resolved_options.at("task"), "energy");
+    EXPECT_EQ(gradient.resolved_options.at("task"), "gradient");
+    EXPECT_EQ(cation.resolved_options.at("charge"), "1");
+    EXPECT_EQ(cation.resolved_options.at("multiplicity"), "2");
+    EXPECT_EQ(high_spin.resolved_options.at("multiplicity"), "3");
 }

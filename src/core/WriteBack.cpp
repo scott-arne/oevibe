@@ -48,12 +48,19 @@ void write_back(OEChem::OEMolBase& mol, const MolecularSystem& system, ResultSet
         if (options.GetWriteTags()) {
             OEChem::OESetSDData(*target, prefix + "Status",
                                 conformer_status_name(result.GetStatus()));
+            // A numeric tag is written only for a value that is present (spec 6.5), and a
+            // missing one is deleted so that a failed rerun cannot leave the previous run's
+            // number behind next to the new Status.
             if (result.HasEnergy()) {
                 OEChem::OESetSDData(*target, prefix + "Energy", format_value(result.GetEnergy()));
+            } else {
+                OEChem::OEDeleteSDData(*target, prefix + "Energy");
             }
             if (result.HasRelativeEnergy()) {
                 OEChem::OESetSDData(*target, prefix + "RelativeEnergy",
                                     format_value(result.GetRelativeEnergy()));
+            } else {
+                OEChem::OEDeleteSDData(*target, prefix + "RelativeEnergy");
             }
         }
     }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 
 #include "core/InputPrep.h"
@@ -18,6 +19,36 @@ using Clock = std::chrono::steady_clock;
 
 double seconds_since(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
+/// The engine schema validates ``accuracy`` as a number only when it declares the keyword as
+/// DOUBLE, so a schema that declares another type can still hand over text that is not one.
+double parse_accuracy(const std::string& text) {
+    double value = 0.0;
+    bool parsed = false;
+    try {
+        std::size_t used = 0;
+        value = std::stod(text, &used);
+        parsed = used == text.size();
+    } catch (const std::exception&) {
+        parsed = false;
+    }
+    if (!parsed || !std::isfinite(value)) {
+        throw OptionsError("keyword 'accuracy' expects a finite number, got '" + text + "'");
+    }
+    return value;
+}
+
+std::string partial_charge_policy_name(PartialChargePolicy policy) {
+    switch (policy) {
+        case PartialChargePolicy::ASSIGN_AM1BCC_ELF10:
+            return "am1bcc-elf10";
+        case PartialChargePolicy::USE_INPUT:
+            return "input";
+        case PartialChargePolicy::NONE:
+        default:
+            return "none";
+    }
 }
 
 Solvent resolve_solvent(const Solvent& requested, const MethodCapabilities& caps) {
@@ -104,6 +135,7 @@ Calculation::Calculation(const CalculationOptions& options) : options_(options) 
                                      engine_name_ +
                                      "' is unavailable: " + caps->unavailable_reason);
     }
+    engine_version_ = engine_->GetVersion();
     capabilities_ = *caps;
     settings_.method = options_.GetMethod();
     settings_.solvent = resolve_solvent(options_.GetSolvent(), capabilities_);
@@ -117,6 +149,10 @@ Calculation::Calculation(const CalculationOptions& options) : options_(options) 
                            "' does not provide: " + property_names(unsupported));
     }
     engine_->ValidateSettings(settings_);
+    // Applied after validation so the keyword's type and bounds are checked first.
+    if (options_.HasKeyword("accuracy")) {
+        settings_.accuracy = parse_accuracy(options_.GetKeyword("accuracy"));
+    }
 }
 
 ResultSet Calculation::Energy(OEChem::OEMolBase& mol) { return RunSinglePoints(mol, false); }
@@ -127,30 +163,44 @@ const std::string& Calculation::GetEngineName() const { return engine_name_; }
 Calculation::CallState Calculation::Prepare(OEChem::OEMolBase& mol) const {
     CallState state;
     state.input = detail::prepare_input(mol, options_);
-    PartialChargePolicy policy = PartialChargePolicy::NONE;
-    if (capabilities_.requires_partial_charges) {
-        policy = options_.GetUseInputPartialCharges() ? PartialChargePolicy::USE_INPUT
-                                                      : PartialChargePolicy::ASSIGN_AM1BCC_ELF10;
-    }
     state.system = std::make_unique<MolecularSystem>(mol, state.input.charge,
-                                                     state.input.multiplicity, policy);
+                                                     state.input.multiplicity, ChargePolicy());
     engine_->ValidateSystem(*state.system, settings_);
     return state;
 }
 
+PartialChargePolicy Calculation::ChargePolicy() const {
+    if (!capabilities_.requires_partial_charges) {
+        return PartialChargePolicy::NONE;
+    }
+    return options_.GetUseInputPartialCharges() ? PartialChargePolicy::USE_INPUT
+                                                : PartialChargePolicy::ASSIGN_AM1BCC_ELF10;
+}
+
 std::map<std::string, std::string> Calculation::BaseResolvedOptions() const {
+    // The accuracy is read from the settings, not the keyword, so that provenance records the
+    // value the engine actually received.
     std::map<std::string, std::string> resolved = {
         {"method", settings_.method.GetName()},
         {"engine", engine_name_},
         {"solvent", settings_.solvent.GetTag()},
         {"preset", preset_name(settings_.preset)},
-        {"accuracy", options_.HasKeyword("accuracy") ? options_.GetKeyword("accuracy")
-                                                     : detail::format_value(settings_.accuracy)},
+        {"accuracy", detail::format_value(settings_.accuracy)},
         {"properties", std::to_string(settings_.properties)},
     };
     for (const auto& [name, value] : settings_.keywords) {
         resolved["keyword." + name] = value;
     }
+    return resolved;
+}
+
+std::map<std::string, std::string> Calculation::CallResolvedOptions(const CallState& state,
+                                                                    const std::string& task) const {
+    std::map<std::string, std::string> resolved = BaseResolvedOptions();
+    resolved["charge"] = std::to_string(state.input.charge);
+    resolved["multiplicity"] = std::to_string(state.input.multiplicity);
+    resolved["partial_charges"] = partial_charge_policy_name(ChargePolicy());
+    resolved["task"] = task;
     return resolved;
 }
 
@@ -165,7 +215,7 @@ ConformerResult Calculation::NewResult(const CallState& state, unsigned position
     Provenance provenance;
     provenance.method = settings_.method.GetName();
     provenance.engine = engine_name_;
-    provenance.engine_version = engine_->GetVersion();
+    provenance.engine_version = engine_version_;
     provenance.solvent_model = settings_.solvent.IsGasPhase()
                                    ? std::string("gas")
                                    : solvent_model_name(settings_.solvent.GetModel());
@@ -181,7 +231,8 @@ ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
     CallState state = Prepare(mol);
     const double setup_seconds = seconds_since(call_start);
     const MolecularSystem& system = *state.system;
-    const std::map<std::string, std::string> resolved = BaseResolvedOptions();
+    const std::map<std::string, std::string> resolved =
+        CallResolvedOptions(state, gradient ? "gradient" : "energy");
     EvaluationRequest request;
     request.gradient = gradient;
     request.properties = settings_.properties;
@@ -199,6 +250,11 @@ ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
                 apply_evaluation(result, evaluation, request, system);
                 result.SetStatus(ConformerStatus::OK, "");
             } else {
+                // Spec 7.5: a failed conformer keeps the values computed before the failure.
+                // Only the energy is trusted; the rest of a malformed evaluation is dropped.
+                if (std::isfinite(evaluation.energy)) {
+                    result.SetEnergy(evaluation.energy);
+                }
                 result.SetStatus(ConformerStatus::ENGINE_ERROR,
                                  "engine returned a malformed Evaluation: " + problem);
             }
