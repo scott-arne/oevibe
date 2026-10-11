@@ -61,8 +61,8 @@ target_compile_definitions(oevibe_eigen INTERFACE Eigen=OEVibeEigen)
 if(OEVIBE_BUILD_PYTHON)
     find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
     # Required so that a Python build without SWIG fails at configure time instead of skipping
-    # the module.
-    find_package(SWIG 4.0 REQUIRED)
+    # the module. The minimum matches the swig build requirement in pyproject.toml.
+    find_package(SWIG 4.2.1 REQUIRED)
 endif()
 
 if(OPENEYE_USE_SHARED)
