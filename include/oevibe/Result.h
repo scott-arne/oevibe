@@ -94,6 +94,7 @@ public:
     double GetHOMO() const;
     bool HasLUMO() const;
     double GetLUMO() const;
+    /// :raises OEVibeError: Unless ``homo_index >= -1`` and ``homo_index < energies.size()``.
     void SetOrbitalEnergies(const std::vector<double>& energies, int homo_index);
     bool HasBondOrders() const;
     /// :returns: Bond orders keyed by OpenEye atom indices with ``i < j``.
@@ -138,22 +139,30 @@ public:
     const ConformerResult& Get(std::size_t index) const;
     bool HasLowest() const;
     /// :returns: The lowest-energy OK conformer; ties go to the lowest conformer index.
-    /// :raises OEVibeError: When no conformer is OK.
+    /// :raises OEVibeError: When no conformer is OK, or when OK conformers have different
+    ///     methods, solvent models, or solvents (spec 9, 10).
     const ConformerResult& GetLowest() const;
     /// :returns: Conformer index to relative energy (kcal/mol) over OK conformers.
     std::map<unsigned, double> GetRelativeEnergies() const;
     /// Weights over OK conformers from electronic energies,
     /// w_i = exp(-(E_i - E_min) / RT) / sum_j exp(-(E_j - E_min) / RT). Plan B adds free
     /// energies when thermochemistry is present.
-    /// :raises OEVibeError: Unless the temperature is finite and greater than 0.
+    /// :raises OEVibeError: Unless the temperature is finite and greater than 0, or when OK
+    ///     conformers have different methods, solvent models, or solvents (spec 9, 10).
     std::map<unsigned, double> GetBoltzmannWeights(double temperature) const;
 
     void Add(ConformerResult result);
     /// Sets each OK conformer's relative energy; call once after the last ``Add``.
+    /// :raises OEVibeError: When OK conformers have different methods, solvent models, or
+    ///     solvents (spec 9, 10).
     void Finalize();
     void AddWarningToAll(const std::string& warning);
 
 private:
+    /// Throws OEVibeError if any two OK results that have energies differ in method, solvent
+    /// model, or solvent.
+    void RequireComparable() const;
+
     std::vector<ConformerResult> results_;
 };
 

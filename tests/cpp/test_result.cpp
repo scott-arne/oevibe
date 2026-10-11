@@ -38,6 +38,9 @@ TEST(ConformerResultTest, ChargesUseTheOpenEyeLayout) {
     result.SetCharges({-0.4, 0.0, 0.1, 0.1, 0.1, 0.1});
     OESystem::OEIter<OEChem::OEAtomBase> carbon = mol.GetAtoms();
     EXPECT_DOUBLE_EQ(result.GetCharge(*carbon), -0.4);
+    OEChem::OEAtomBase* hydrogen = mol.GetAtom(OEChem::OEHasAtomIdx(2));
+    ASSERT_TRUE(hydrogen != nullptr);
+    EXPECT_DOUBLE_EQ(result.GetCharge(*hydrogen), 0.1);
 }
 
 TEST(ConformerResultTest, OrbitalFrontier) {
@@ -60,6 +63,16 @@ TEST(ConformerResultTest, BondOrdersAreSymmetric) {
     EXPECT_DOUBLE_EQ(result.GetBondOrder(3, 2), 1.5);
     EXPECT_DOUBLE_EQ(result.GetBondOrder(0, 3), 0.0);
     EXPECT_EQ(result.GetBondOrders().size(), 2u);
+}
+
+TEST(ConformerResultTest, InvalidHomoIndexIsRejected) {
+    ConformerResult result;
+    EXPECT_THROW(result.SetOrbitalEnergies({-12.0, -9.0}, 2), OEVibeError);
+    EXPECT_THROW(result.SetOrbitalEnergies({-12.0, -9.0}, -2), OEVibeError);
+    result.SetOrbitalEnergies({-12.0, -9.0}, -1);
+    EXPECT_FALSE(result.HasHOMO());
+    EXPECT_TRUE(result.HasLUMO());
+    EXPECT_DOUBLE_EQ(result.GetLUMO(), -12.0);
 }
 
 TEST(ResultSetTest, RelativeEnergiesCoverOkConformersOnly) {
@@ -119,4 +132,50 @@ TEST(ResultSetTest, StatusNames) {
     EXPECT_EQ(conformer_status_name(ConformerStatus::NOT_CONVERGED), "NOT_CONVERGED");
     EXPECT_EQ(conformer_status_name(ConformerStatus::ENGINE_ERROR), "ENGINE_ERROR");
     EXPECT_EQ(conformer_status_name(ConformerStatus::UNSUPPORTED), "UNSUPPORTED");
+}
+
+TEST(ResultSetTest, MixedMethodsCannotBeCompared) {
+    ResultSet results;
+    ConformerResult result0 = ok_result(0, -10.0);
+    Provenance prov0;
+    prov0.method = "mmff94";
+    result0.SetProvenance(prov0);
+    results.Add(result0);
+
+    ConformerResult result1 = ok_result(1, -12.0);
+    Provenance prov1;
+    prov1.method = "sage";
+    result1.SetProvenance(prov1);
+    results.Add(result1);
+
+    EXPECT_THROW(results.Finalize(), OEVibeError);
+
+    ResultSet results2;
+    results2.Add(result0);
+    results2.Add(result1);
+    EXPECT_THROW(results2.GetLowest(), OEVibeError);
+
+    ResultSet results3;
+    results3.Add(result0);
+    results3.Add(result1);
+    EXPECT_THROW(results3.GetBoltzmannWeights(298.15), OEVibeError);
+}
+
+TEST(ResultSetTest, MixedSolventModelsCannotBeCompared) {
+    ResultSet results;
+    ConformerResult result0 = ok_result(0, -10.0);
+    Provenance prov0;
+    prov0.method = "mmff94";
+    prov0.solvent_model = "gas";
+    result0.SetProvenance(prov0);
+    results.Add(result0);
+
+    ConformerResult result1 = ok_result(1, -12.0);
+    Provenance prov1;
+    prov1.method = "mmff94";
+    prov1.solvent_model = "sheffield";
+    result1.SetProvenance(prov1);
+    results.Add(result1);
+
+    EXPECT_THROW(results.GetLowest(), OEVibeError);
 }

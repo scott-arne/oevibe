@@ -91,7 +91,8 @@ std::string sha256_hex(const std::string& data) {
 std::string options_digest(const std::map<std::string, std::string>& resolved) {
     std::string canonical;
     for (const auto& [key, value] : resolved) {
-        canonical += key + "=" + value + "\n";
+        canonical +=
+            std::to_string(key.size()) + ":" + key + std::to_string(value.size()) + ":" + value;
     }
     return sha256_hex(canonical);
 }

@@ -95,7 +95,10 @@ bool ConformerResult::HasOrbitalEnergies() const { return orbital_energies_.has_
 std::vector<double> ConformerResult::GetOrbitalEnergies() const {
     return require_value(orbital_energies_, "orbital energies");
 }
-bool ConformerResult::HasHOMO() const { return orbital_energies_.has_value() && homo_index_ >= 0; }
+bool ConformerResult::HasHOMO() const {
+    return orbital_energies_.has_value() && homo_index_ >= 0 &&
+           static_cast<std::size_t>(homo_index_) < orbital_energies_->size();
+}
 double ConformerResult::GetHOMO() const {
     if (!HasHOMO()) {
         throw OEVibeError("HOMO is not available for this conformer");
@@ -103,8 +106,9 @@ double ConformerResult::GetHOMO() const {
     return (*orbital_energies_)[static_cast<std::size_t>(homo_index_)];
 }
 bool ConformerResult::HasLUMO() const {
-    return orbital_energies_.has_value() &&
-           homo_index_ + 1 < static_cast<int>(orbital_energies_->size());
+    return orbital_energies_.has_value() && homo_index_ >= -1 &&
+           static_cast<long long>(homo_index_) + 1 <
+               static_cast<long long>(orbital_energies_->size());
 }
 double ConformerResult::GetLUMO() const {
     if (!HasLUMO()) {
@@ -113,6 +117,10 @@ double ConformerResult::GetLUMO() const {
     return (*orbital_energies_)[static_cast<std::size_t>(homo_index_ + 1)];
 }
 void ConformerResult::SetOrbitalEnergies(const std::vector<double>& energies, int homo_index) {
+    if (homo_index < -1 || homo_index >= static_cast<long long>(energies.size())) {
+        throw OEVibeError("HOMO index " + std::to_string(homo_index) + " is out of range for " +
+                          std::to_string(energies.size()) + " orbital energies");
+    }
     orbital_energies_ = energies;
     homo_index_ = homo_index;
 }
@@ -160,6 +168,34 @@ const ConformerResult& ResultSet::Get(std::size_t index) const {
     return results_[index];
 }
 
+void ResultSet::RequireComparable() const {
+    const ConformerResult* reference = nullptr;
+    for (const ConformerResult& result : results_) {
+        if (result.GetStatus() != ConformerStatus::OK || !result.HasEnergy()) {
+            continue;
+        }
+        if (reference == nullptr) {
+            reference = &result;
+        } else {
+            const Provenance& ref_prov = reference->GetProvenance();
+            const Provenance& result_prov = result.GetProvenance();
+            if (ref_prov.method != result_prov.method) {
+                throw OEVibeError("cannot compare energies: methods differ (\"" + ref_prov.method +
+                                  "\" vs \"" + result_prov.method + "\")");
+            }
+            if (ref_prov.solvent_model != result_prov.solvent_model) {
+                throw OEVibeError("cannot compare energies: solvent models differ (\"" +
+                                  ref_prov.solvent_model + "\" vs \"" + result_prov.solvent_model +
+                                  "\")");
+            }
+            if (ref_prov.solvent != result_prov.solvent) {
+                throw OEVibeError("cannot compare energies: solvents differ (\"" +
+                                  ref_prov.solvent + "\" vs \"" + result_prov.solvent + "\")");
+            }
+        }
+    }
+}
+
 bool ResultSet::HasLowest() const {
     return std::any_of(results_.begin(), results_.end(), [](const ConformerResult& r) {
         return r.GetStatus() == ConformerStatus::OK && r.HasEnergy();
@@ -167,6 +203,7 @@ bool ResultSet::HasLowest() const {
 }
 
 const ConformerResult& ResultSet::GetLowest() const {
+    RequireComparable();
     const ConformerResult* lowest = nullptr;
     for (const ConformerResult& result : results_) {
         if (result.GetStatus() != ConformerStatus::OK || !result.HasEnergy()) {
@@ -198,6 +235,7 @@ std::map<unsigned, double> ResultSet::GetBoltzmannWeights(double temperature) co
     if (!std::isfinite(temperature) || temperature <= 0.0) {
         throw OEVibeError("temperature must be finite and greater than 0 K");
     }
+    RequireComparable();
     std::map<unsigned, double> weights;
     if (!HasLowest()) {
         return weights;
@@ -221,6 +259,7 @@ std::map<unsigned, double> ResultSet::GetBoltzmannWeights(double temperature) co
 void ResultSet::Add(ConformerResult result) { results_.push_back(std::move(result)); }
 
 void ResultSet::Finalize() {
+    RequireComparable();
     const bool any = HasLowest();
     const double minimum = any ? GetLowest().GetEnergy() : 0.0;
     for (ConformerResult& result : results_) {

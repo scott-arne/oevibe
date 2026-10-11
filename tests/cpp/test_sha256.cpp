@@ -27,3 +27,9 @@ TEST(Sha256Test, OptionsDigestIsCanonical) {
     b["preset"] = "fast";
     EXPECT_NE(detail::options_digest(a), detail::options_digest(b));
 }
+
+TEST(Sha256Test, OptionsDigestIsInjective) {
+    const std::map<std::string, std::string> a = {{"a", "x\nb=y"}};
+    const std::map<std::string, std::string> b = {{"a", "x"}, {"b", "y"}};
+    EXPECT_NE(detail::options_digest(a), detail::options_digest(b));
+}
