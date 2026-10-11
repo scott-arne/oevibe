@@ -85,7 +85,9 @@ TEST(CalculationOptimizeTest, FrozenAtomsStayPut) {
     constraints.FreezeAtoms(mol, OEChem::OEIsHeavy());
     OptimizerOptions options;
     options.SetConstraints(constraints);
-    Calculation(mmff94()).Optimize(mol, options);
+    const ResultSet results = Calculation(mmff94()).Optimize(mol, options);
+    // A failed conformer writes nothing back, which would leave the frozen atoms trivially put.
+    ASSERT_EQ(results.Get(0).GetStatus(), ConformerStatus::OK) << results.Get(0).GetMessage();
     const std::vector<double> after = coordinates_of(*mol.GetActive());
     for (OESystem::OEIter<OEChem::OEAtomBase> atom = mol.GetAtoms(OEChem::OEIsHeavy()); atom;
          ++atom) {
@@ -116,6 +118,50 @@ TEST(CalculationOptimizeTest, DihedralConstraintIsHeld) {
                              conf->GetAtom(OEChem::OEHasAtomIdx(carbons[2])),
                              conf->GetAtom(OEChem::OEHasAtomIdx(carbons[3])));
     EXPECT_NEAR(torsion * Units::RADIANS_TO_DEGREES, 60.0, 1e-3);
+}
+
+TEST(CalculationOptimizeTest, ConstraintContentEntersProvenanceAndDigest) {
+    // SMILES parsing numbers the carbons 0-3; OMEGA appends the hydrogens after them.
+    const OEChem::OEMol mol = test::make_conformers("CCCC");
+    const auto provenance_of = [&mol](const ConstraintSet& constraints) {
+        OEChem::OEMol copy(mol);
+        OptimizerOptions options;
+        options.SetConstraints(constraints);
+        return Calculation(mmff94()).Optimize(copy, options).Get(0).GetProvenance();
+    };
+
+    ConstraintSet sixty;
+    sixty.AddDihedral(0, 1, 2, 3, 60.0);
+    sixty.AddDistance(1, 0);
+    ConstraintSet one_twenty;
+    one_twenty.AddDihedral(0, 1, 2, 3, 120.0);
+    one_twenty.AddDistance(1, 0);
+    const Provenance at_sixty = provenance_of(sixty);
+    const Provenance at_one_twenty = provenance_of(one_twenty);
+    EXPECT_EQ(at_sixty.resolved_options.at("optimizer.constraints"),
+              "dihedral:0,1,2,3:60.000000;distance:1,0:start");
+    EXPECT_EQ(at_one_twenty.resolved_options.at("optimizer.constraints"),
+              "dihedral:0,1,2,3:120.000000;distance:1,0:start");
+    EXPECT_NE(at_sixty.options_digest, at_one_twenty.options_digest);
+
+    ConstraintSet low;
+    low.FreezeAtomIndices({1, 0});
+    ConstraintSet high;
+    high.FreezeAtomIndices({3, 2});
+    const Provenance frozen_low = provenance_of(low);
+    const Provenance frozen_high = provenance_of(high);
+    EXPECT_EQ(frozen_low.resolved_options.at("optimizer.frozen_atoms"), "0,1");
+    EXPECT_EQ(frozen_high.resolved_options.at("optimizer.frozen_atoms"), "2,3");
+    EXPECT_NE(frozen_low.options_digest, frozen_high.options_digest);
+
+    ConstraintSet restrained;
+    restrained.AddPositionRestraint(0, 10.0);
+    restrained.AddDistanceRestraint(0, 3, 5.0, 3.5);
+    const Provenance with_restraints = provenance_of(restrained);
+    EXPECT_EQ(with_restraints.resolved_options.at("optimizer.restraints"),
+              "position:0:10.000000:start;distance:0,3:5.000000:3.500000");
+    EXPECT_EQ(with_restraints.resolved_options.at("optimizer.frozen_atoms"), "");
+    EXPECT_EQ(with_restraints.resolved_options.at("optimizer.constraints"), "");
 }
 
 TEST(CalculationOptimizeTest, OptionAndInputErrorsComeFirst) {

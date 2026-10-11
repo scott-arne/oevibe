@@ -50,7 +50,11 @@ def test_freeze_atoms_with_builtin_and_python_predicates(butanol_conformers):
     )
     constraints.FreezeAtoms(butanol_conformers, IsOxygen())
     before = {conf.GetIdx(): conf.GetCoords() for conf in butanol_conformers.GetConfs()}
-    oevibe.optimize(butanol_conformers, method="mmff94", constraints=constraints)
+    results = oevibe.optimize(
+        butanol_conformers, method="mmff94", constraints=constraints
+    )
+    # A failed conformer writes nothing back, which would leave the frozen atoms trivially put.
+    assert all(r.GetStatus() == oevibe.ConformerStatus.OK for r in results)
     for conf in butanol_conformers.GetConfs():
         for atom in conf.GetAtoms(oechem.OEIsHeavy()):
             assert conf.GetCoords(atom) == pytest.approx(

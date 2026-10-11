@@ -53,6 +53,70 @@ std::string partial_charge_policy_name(PartialChargePolicy policy) {
     }
 }
 
+std::string constraint_kind_name(ConstraintKind kind) {
+    switch (kind) {
+        case ConstraintKind::ANGLE:
+            return "angle";
+        case ConstraintKind::DIHEDRAL:
+            return "dihedral";
+        case ConstraintKind::DISTANCE:
+        default:
+            return "distance";
+    }
+}
+
+std::string restraint_kind_name(RestraintKind kind) {
+    switch (kind) {
+        case RestraintKind::ANGLE:
+            return "angle";
+        case RestraintKind::DIHEDRAL:
+            return "dihedral";
+        case RestraintKind::POSITION:
+            return "position";
+        case RestraintKind::DISTANCE:
+        default:
+            return "distance";
+    }
+}
+
+// The provenance encodings of a ConstraintSet, so that sets that can give different results
+// never share an options digest. Terms are joined with ';', a term's fields with ':', and atom
+// indices with ','; none of these occur in an index, a kind name, a format_value number, or
+// "start", which marks a target taken from the starting geometry. Constraint and restraint atoms
+// keep the caller's order, frozen atoms are sorted, and an empty list encodes as "".
+std::string encode_indices(const std::vector<unsigned>& indices) {
+    std::string text;
+    for (std::size_t k = 0; k < indices.size(); ++k) {
+        text += (k == 0 ? "" : ",") + std::to_string(indices[k]);
+    }
+    return text;
+}
+
+std::string encode_target(bool has_target, double target) {
+    return has_target ? detail::format_value(target) : "start";
+}
+
+std::string encode_constraints(const std::vector<Constraint>& constraints) {
+    std::string text;
+    for (std::size_t k = 0; k < constraints.size(); ++k) {
+        const Constraint& term = constraints[k];
+        text += (k == 0 ? "" : ";") + constraint_kind_name(term.kind) + ":" +
+                encode_indices(term.atoms) + ":" + encode_target(term.has_target, term.target);
+    }
+    return text;
+}
+
+std::string encode_restraints(const std::vector<Restraint>& restraints) {
+    std::string text;
+    for (std::size_t k = 0; k < restraints.size(); ++k) {
+        const Restraint& term = restraints[k];
+        text += (k == 0 ? "" : ";") + restraint_kind_name(term.kind) + ":" +
+                encode_indices(term.atoms) + ":" + detail::format_value(term.force_constant) + ":" +
+                encode_target(term.has_target, term.target);
+    }
+    return text;
+}
+
 Solvent resolve_solvent(const Solvent& requested, const MethodCapabilities& caps) {
     if (requested.IsGasPhase()) {
         return requested;
@@ -297,9 +361,9 @@ ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& 
         detail::format_value(resolved_settings.initial_trust_radius);
     resolved["optimizer.max_trust_radius"] =
         detail::format_value(resolved_settings.max_trust_radius);
-    resolved["optimizer.frozen_atoms"] = std::to_string(constraints.GetFrozenAtoms().size());
-    resolved["optimizer.constraints"] = std::to_string(constraints.GetConstraints().size());
-    resolved["optimizer.restraints"] = std::to_string(constraints.GetRestraints().size());
+    resolved["optimizer.frozen_atoms"] = encode_indices(constraints.GetFrozenAtoms());
+    resolved["optimizer.constraints"] = encode_constraints(constraints.GetConstraints());
+    resolved["optimizer.restraints"] = encode_restraints(constraints.GetRestraints());
 
     ResultSet results;
     for (unsigned position = 0; position < system.NumConformers(); ++position) {
