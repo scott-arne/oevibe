@@ -27,6 +27,7 @@ add_executable(oevibe_tests
     test_oeff_engine.cpp
     test_result.cpp
     test_sha256.cpp
+    test_calculation.cpp
 )
 
 target_link_libraries(oevibe_tests

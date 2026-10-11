@@ -106,6 +106,8 @@ set(OEVIBE_SOURCES
     src/engines/OEFFEngine.cpp
     src/Result.cpp
     src/core/Sha256.cpp
+    src/Calculation.cpp
+    src/core/WriteBack.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

@@ -184,8 +184,9 @@ public:
             bonds.emplace_back(std::min(bond->GetBgnIdx(), bond->GetEndIdx()),
                                std::max(bond->GetBgnIdx(), bond->GetEndIdx()));
         }
-        return std::make_shared<FakeSession>(system.GetConformerCoordinates(0), mode,
-                                             force_constant, bonds);
+        return std::make_shared<FakeSession>(
+            reference.empty() ? system.GetConformerCoordinates(0) : reference, mode, force_constant,
+            bonds);
     }
 
     bool available = true;
@@ -194,6 +195,7 @@ public:
     std::vector<KeywordSpec> keyword_specs;
     FakeMode mode = FakeMode::HARMONIC;
     double force_constant = 50.0;
+    std::vector<double> reference;
     int sessions_created = 0;
     EngineSettings last_settings;
 
