@@ -109,6 +109,8 @@ set(OEVIBE_SOURCES
     src/core/WriteBack.cpp
     src/core/Geometry.cpp
     src/core/ConstraintMath.cpp
+    src/core/ModelHessian.cpp
+    src/core/AncCoordinates.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

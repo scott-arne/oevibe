@@ -30,6 +30,7 @@ add_executable(oevibe_tests
     test_calculation.cpp
     test_geometry.cpp
     test_constraint_math.cpp
+    test_model_hessian.cpp
 )
 
 target_link_libraries(oevibe_tests
