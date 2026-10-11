@@ -523,6 +523,23 @@ same molecule must not be passed to calculations from more than one thread at a 
 %include "oevibe/Preset.h"
 %include "oevibe/Solvent.h"
 %include "oevibe/Property.h"
+// Indexing returns a pointer into the vector's storage. The element's reference to the vector
+// keeps that storage allocated but not in place, so every method that can reallocate, shrink,
+// swap, or replace it would leave elements taken earlier dangling. Results hand out bond orders
+// as copies and nothing in Python passes a vector to C++, so the vector is read-only here.
+%ignore std::vector<OEVIBE::BondOrder>::append;
+%ignore std::vector<OEVIBE::BondOrder>::push_back;
+%ignore std::vector<OEVIBE::BondOrder>::insert;
+%ignore std::vector<OEVIBE::BondOrder>::assign;
+%ignore std::vector<OEVIBE::BondOrder>::resize;
+%ignore std::vector<OEVIBE::BondOrder>::reserve;
+%ignore std::vector<OEVIBE::BondOrder>::pop;
+%ignore std::vector<OEVIBE::BondOrder>::pop_back;
+%ignore std::vector<OEVIBE::BondOrder>::erase;
+%ignore std::vector<OEVIBE::BondOrder>::clear;
+%ignore std::vector<OEVIBE::BondOrder>::swap;
+%ignore std::vector<OEVIBE::BondOrder>::__setitem__;
+%ignore std::vector<OEVIBE::BondOrder>::__delitem__;
 %template(BondOrderVector) std::vector<OEVIBE::BondOrder>;
 %include "oevibe/Constraints.h"
 %include "oevibe/Options.h"
