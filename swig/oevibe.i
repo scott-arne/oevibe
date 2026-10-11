@@ -468,6 +468,9 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %pythonappend OEVIBE::ConformerResult::GetProvenance %{ val._parent = self %}
 %pythonappend OEVIBE::ConformerResult::GetTimings %{ val._parent = self %}
 %pythonappend OEVIBE::OptimizerOptions::GetConstraints %{ val._parent = self %}
+%pythonappend OEVIBE::Calculation::GetOptions %{ val._parent = self %}
+%pythonappend OEVIBE::CalculationOptions::GetMethod %{ val._parent = self %}
+%pythonappend OEVIBE::CalculationOptions::GetSolvent %{ val._parent = self %}
 
 // ============================================================================
 // Version
