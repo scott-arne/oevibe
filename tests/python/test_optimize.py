@@ -77,3 +77,13 @@ def test_optimize_options(butanol_conformers):
         )
     with pytest.raises(oevibe.OptionsError):
         oevibe.optimize(butanol_conformers, method="mmff94", algorithm="newton")
+
+
+def test_out_of_range_integers_are_option_errors(butanol_conformers):
+    # SWIG's unsigned conversion would raise OverflowError for these.
+    with pytest.raises(oevibe.OptionsError, match="max_iterations"):
+        oevibe.optimize(butanol_conformers, method="mmff94", max_iterations=-1)
+    with pytest.raises(oevibe.OptionsError, match="max_iterations"):
+        oevibe.optimize(butanol_conformers, method="mmff94", max_iterations=2**32)
+    with pytest.raises(oevibe.OptionsError, match="multiplicity"):
+        oevibe.optimize(butanol_conformers, method="mmff94", multiplicity=-1)

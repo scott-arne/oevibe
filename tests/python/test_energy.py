@@ -50,6 +50,18 @@ def test_option_errors(butanol_conformers):
         oevibe.energy(butanol_conformers, method="mmff94", solvent="octanol")
 
 
+def test_out_of_range_integers_are_option_errors(butanol_conformers):
+    # SWIG's integer conversion would raise OverflowError for these.
+    with pytest.raises(oevibe.OptionsError, match="multiplicity"):
+        oevibe.energy(butanol_conformers, method="mmff94", multiplicity=-1)
+    with pytest.raises(oevibe.OptionsError, match="multiplicity"):
+        oevibe.gradient(butanol_conformers, method="mmff94", multiplicity=2**32)
+    with pytest.raises(oevibe.OptionsError, match="charge"):
+        oevibe.energy(butanol_conformers, method="mmff94", charge=2**31)
+    with pytest.raises(oevibe.OptionsError, match="charge"):
+        oevibe.energy(butanol_conformers, method="mmff94", charge=-(2**31) - 1)
+
+
 def test_input_errors(flat_ethanol):
     with pytest.raises(oevibe.InputError):
         oevibe.energy(flat_ethanol, method="mmff94")

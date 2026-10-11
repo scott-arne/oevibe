@@ -18,6 +18,20 @@ _PROPERTIES = {
     "orbital_energies": _core.Property_ORBITAL_ENERGIES,
     "bond_orders": _core.Property_BOND_ORDERS,
 }
+_INT_MIN = -(2**31)
+_INT_MAX = 2**31 - 1
+_UNSIGNED_MAX = 2**32 - 1
+
+
+def _checked_int(name: str, value: Any, minimum: int, maximum: int) -> int:
+    # SWIG rejects integers outside the C parameter's range with OverflowError; the verbs
+    # report every invalid option as OptionsError instead.
+    number = int(value)
+    if number < minimum:
+        raise _core.OptionsError(f"{name} must be at least {minimum}, got {number}")
+    if number > maximum:
+        raise _core.OptionsError(f"{name} must be at most {maximum}, got {number}")
+    return number
 
 
 def _preset(value: Any) -> int:
@@ -81,9 +95,11 @@ def _calculation_options(
     options.SetPreset(_preset(preset))
     options.SetProperties(_properties(properties))
     if charge is not None:
-        options.SetCharge(int(charge))
+        options.SetCharge(_checked_int("charge", charge, _INT_MIN, _INT_MAX))
     if multiplicity is not None:
-        options.SetMultiplicity(int(multiplicity))
+        options.SetMultiplicity(
+            _checked_int("multiplicity", multiplicity, 1, _UNSIGNED_MAX)
+        )
     for name, value in (keywords or {}).items():
         options.SetKeyword(str(name), _keyword_text(value))
     return options
@@ -203,7 +219,9 @@ def optimize(
     optimizer = _core.OptimizerOptions()
     optimizer.SetAlgorithm(_algorithm(algorithm))
     if max_iterations is not None:
-        optimizer.SetMaxIterations(int(max_iterations))
+        optimizer.SetMaxIterations(
+            _checked_int("max_iterations", max_iterations, 1, _UNSIGNED_MAX)
+        )
     if constraints is not None:
         optimizer.SetConstraints(constraints)
     return _core.Calculation(options).Optimize(mol, optimizer)
