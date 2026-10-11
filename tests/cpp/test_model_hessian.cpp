@@ -2,6 +2,8 @@
 
 #include <Eigen/Dense>
 
+#include <string>
+#include <typeinfo>
 #include <vector>
 
 #include "core/AncCoordinates.h"
@@ -43,6 +45,13 @@ Eigen::VectorXd rotation(const std::vector<double>& x, int axis) {
 }
 
 }  // namespace
+
+// The static OpenEye libraries embed a different Eigen. Without the namespace rename from the
+// root CMakeLists.txt, optimized links resolve our Eigen template instantiations to OpenEye's
+// and the solvers below corrupt the heap, so this pins the rename itself.
+TEST(EigenIsolationTest, NamespaceIsRenamedAwayFromOpenEyeEigen) {
+    EXPECT_NE(std::string(typeid(Eigen::MatrixXd).name()).find("OEVibeEigen"), std::string::npos);
+}
 
 TEST(ModelHessianTest, SymmetricSemidefiniteAndRigidInvariant) {
     const Molecule mol = ethanol();

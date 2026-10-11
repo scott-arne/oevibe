@@ -50,6 +50,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(eigen)
 add_library(oevibe_eigen INTERFACE)
 target_include_directories(oevibe_eigen SYSTEM INTERFACE ${eigen_SOURCE_DIR})
+# The static OpenEye libraries embed an older Eigen whose template instantiations (for example
+# SelfAdjointEigenSolver<MatrixXd>) have the same mangled names but a different class layout.
+# When optimized, ld64 coalesces our weak definitions onto OpenEye's, so a solver constructed
+# with the 3.4 layout is driven by 3.3 code and corrupts the heap. Renaming the namespace gives
+# every Eigen symbol of ours a distinct name; it must apply to every translation unit that
+# includes Eigen, so it lives on this target rather than in the sources.
+target_compile_definitions(oevibe_eigen INTERFACE Eigen=OEVibeEigen)
 
 if(OEVIBE_BUILD_PYTHON)
     find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
