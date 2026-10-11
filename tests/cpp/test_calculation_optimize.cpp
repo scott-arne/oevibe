@@ -3,6 +3,8 @@
 #include <oechem.h>
 
 #include <cmath>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "oevibe/Calculation.h"
@@ -293,6 +295,30 @@ TEST(CalculationOptimizeTest, ImmediateEngineFailuresKeepNoValues) {
     EXPECT_FALSE(result.HasEnergy());
     EXPECT_FALSE(result.HasCoordinates());
     EXPECT_FALSE(result.HasOptimizationStats());
+}
+
+TEST(CalculationOptimizeTest, NullSessionsBecomeEngineErrors) {
+    const std::shared_ptr<test::FakeEngine> engine = test::register_fake("optimize-null-session");
+    engine->null_session = true;
+    CalculationOptions options;
+    options.SetMethod(Method("fake-method"));
+    options.SetEngine("optimize-null-session");
+    OEChem::OEMol mol = test::make_conformers("CCCCO", 3);
+    ASSERT_GE(mol.NumConfs(), 2u);
+    const std::vector<double> before = coordinates_of(*mol.GetActive());
+    const ResultSet results = Calculation(options).Optimize(mol, OptimizerOptions());
+    ASSERT_EQ(results.Size(), mol.NumConfs());
+    EXPECT_EQ(engine->sessions_created, static_cast<int>(mol.NumConfs()));
+    for (std::size_t i = 0; i < results.Size(); ++i) {
+        const ConformerResult& result = results.Get(i);
+        EXPECT_EQ(result.GetStatus(), ConformerStatus::ENGINE_ERROR);
+        EXPECT_NE(result.GetMessage().find("null session"), std::string::npos)
+            << result.GetMessage();
+        EXPECT_FALSE(result.HasEnergy());
+        EXPECT_FALSE(result.HasCoordinates());
+        EXPECT_FALSE(result.HasOptimizationStats());
+    }
+    EXPECT_EQ(coordinates_of(*mol.GetActive()), before);
 }
 
 TEST(CalculationOptimizeTest, IterationLimitGivesNotConverged) {

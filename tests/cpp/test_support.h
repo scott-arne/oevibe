@@ -193,6 +193,9 @@ public:
                                                  const EngineSettings& settings) override {
         ++sessions_created;
         last_settings = settings;
+        if (null_session) {
+            return nullptr;
+        }
         if (mode == FakeMode::THROW_UNSUPPORTED) {
             throw UnsupportedError("fake engine cannot handle this system");
         }
@@ -216,6 +219,8 @@ public:
     unsigned healthy_evaluations = 0;
     double force_constant = 50.0;
     std::vector<double> reference;
+    /// Makes CreateSession return null, which the engine contract forbids, to test the guard.
+    bool null_session = false;
     int sessions_created = 0;
     EngineSettings last_settings;
 

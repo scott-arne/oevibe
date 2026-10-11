@@ -112,6 +112,8 @@ public:
     /// :raises InputError: Listing every problem found.
     virtual void ValidateSystem(const MolecularSystem& system,
                                 const EngineSettings& settings) const;
+    /// :returns: A new session; never null. ``Calculation`` reports a null session as an
+    ///     ENGINE_ERROR for the conformer it was created for.
     /// :raises UnsupportedError: For a system the engine cannot handle.
     virtual std::shared_ptr<EngineSession> CreateSession(const MolecularSystem& system,
                                                          const EngineSettings& settings) = 0;

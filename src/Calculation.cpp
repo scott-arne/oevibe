@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <stdexcept>
 
 #include "core/ConstraintMath.h"
 #include "core/InputPrep.h"
@@ -140,6 +141,19 @@ Solvent resolve_solvent(const Solvent& requested, const MethodCapabilities& caps
                            requested.GetName() + "'");
     }
     return requested.WithModel(model);
+}
+
+/// The engine contract forbids a null session, but dereferencing one would crash the whole call
+/// instead of failing one conformer (spec 7.5), so it is reported like any engine failure.
+/// :raises std::runtime_error: When the engine returns a null session.
+std::shared_ptr<EngineSession> create_session(Engine& engine, const std::string& engine_name,
+                                              const MolecularSystem& system,
+                                              const EngineSettings& settings) {
+    std::shared_ptr<EngineSession> session = engine.CreateSession(system, settings);
+    if (!session) {
+        throw std::runtime_error("engine '" + engine_name + "' returned a null session");
+    }
+    return session;
 }
 
 void apply_evaluation(ConformerResult& result, const Evaluation& evaluation,
@@ -308,7 +322,8 @@ ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
         ConformerResult result = NewResult(state, position, resolved);
         const Clock::time_point start = Clock::now();
         try {
-            std::shared_ptr<EngineSession> session = engine_->CreateSession(system, settings_);
+            std::shared_ptr<EngineSession> session =
+                create_session(*engine_, engine_name_, system, settings_);
             const Evaluation evaluation =
                 session->Evaluate(system.GetConformerCoordinates(position), request);
             const std::string problem = validate_evaluation(evaluation, request, system.NumAtoms());
@@ -375,7 +390,8 @@ ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& 
         ConformerResult result = NewResult(state, position, resolved);
         const Clock::time_point start = Clock::now();
         try {
-            std::shared_ptr<EngineSession> session = engine_->CreateSession(system, settings_);
+            std::shared_ptr<EngineSession> session =
+                create_session(*engine_, engine_name_, system, settings_);
             const std::vector<double>& x0 = system.GetConformerCoordinates(position);
             detail::OptimizationProblem problem;
             problem.x0 = x0;

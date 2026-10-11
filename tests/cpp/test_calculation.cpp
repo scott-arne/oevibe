@@ -161,6 +161,30 @@ TEST(CalculationTest, EngineFailuresBecomeStatuses) {
     EXPECT_FALSE(results.Get(0).HasGradient());
 }
 
+// A null session breaks the engine contract; dereferencing it would crash the whole call
+// instead of failing one conformer (spec 7.5).
+TEST(CalculationTest, NullSessionsBecomeEngineErrors) {
+    auto engine = test::register_fake("calc-null-session");
+    engine->null_session = true;
+    OEChem::OEMol mol = test::make_conformers("CCCCO", 3);
+    ASSERT_GE(mol.NumConfs(), 2u);
+    for (const bool gradient : {false, true}) {
+        SCOPED_TRACE(gradient ? "gradient" : "energy");
+        engine->sessions_created = 0;
+        Calculation calc(fake_options("calc-null-session"));
+        const ResultSet results = gradient ? calc.Gradient(mol) : calc.Energy(mol);
+        ASSERT_EQ(results.Size(), mol.NumConfs());
+        // Every conformer still gets its own attempt.
+        EXPECT_EQ(engine->sessions_created, static_cast<int>(mol.NumConfs()));
+        for (std::size_t i = 0; i < results.Size(); ++i) {
+            const ConformerResult& result = results.Get(i);
+            EXPECT_EQ(result.GetStatus(), ConformerStatus::ENGINE_ERROR);
+            EXPECT_TRUE(contains(result.GetMessage(), "null session")) << result.GetMessage();
+            EXPECT_FALSE(result.HasEnergy());
+        }
+    }
+}
+
 TEST(CalculationTest, PartialChargeWriteBackIgnoresConformerOrder) {
     auto engine = test::register_fake("calc-charges");
     CalculationOptions options = fake_options("calc-charges");
