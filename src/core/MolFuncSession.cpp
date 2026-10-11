@@ -10,8 +10,8 @@ namespace detail {
 
 MolFuncSession::MolFuncSession(std::unique_ptr<OEMolPotential::OEMolFunc1> function,
                                const MolecularSystem& system)
-    : function_(std::move(function)),
-      molecule_(system.GetMolecule()),
+    : molecule_(system.GetMolecule()),
+      function_(std::move(function)),
       num_atoms_(system.NumAtoms()) {
     const std::string title = molecule_.GetTitle();
     if (auto* force_field = dynamic_cast<OEMolPotential::OEForceField*>(function_.get())) {

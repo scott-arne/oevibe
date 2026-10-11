@@ -25,8 +25,10 @@ public:
                         const EvaluationRequest& request) override;
 
 private:
-    std::unique_ptr<OEMolPotential::OEMolFunc1> function_;
+    // Declared before function_ so the potential is destroyed first: it may touch the molecule
+    // it was set up on while it is destroyed.
     OEChem::OEMol molecule_;
+    std::unique_ptr<OEMolPotential::OEMolFunc1> function_;
     unsigned num_atoms_;
 };
 

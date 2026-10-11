@@ -26,6 +26,54 @@ std::vector<double> gradient_at(EngineSession& session, std::vector<double> coor
     return session.Evaluate(coords, request).gradient;
 }
 
+/// Minimal potential for adapter edge cases. Like OpenEye force fields it keeps a pointer to the
+/// molecule it was set up on, so a test can check that molecule is still alive when the potential
+/// is destroyed.
+class StubPotential : public OEMolPotential::OEMolFunc1 {
+public:
+    struct Probe {
+        /// ``CreateCopy`` returns null once this reaches zero; some OpenEye potentials always do.
+        int copies_allowed = 1000;
+        unsigned atoms_at_destruction = 0;
+    };
+
+    explicit StubPotential(Probe& probe) : probe_(&probe) {}
+
+    ~StubPotential() override {
+        if (molecule_ != nullptr) {
+            probe_->atoms_at_destruction = molecule_->NumAtoms();
+        }
+    }
+
+    bool Setup(const OEChem::OEMolBase& mol) override {
+        molecule_ = &mol;
+        return true;
+    }
+
+    unsigned NumVar() const override {
+        return molecule_ == nullptr ? 0u : 3u * molecule_->NumAtoms();
+    }
+
+    double operator()(const double*) override { return 0.0; }
+    double operator()(const double*, double*) override { return 0.0; }
+
+    OESystem::OEIterBase<OEOpt::OEFComponent>* GetFComponents(const double*) override {
+        return nullptr;
+    }
+
+    OEMolPotential::OEMolFunc1* CreateCopy() const override {
+        if (probe_->copies_allowed <= 0) {
+            return nullptr;
+        }
+        --probe_->copies_allowed;
+        return new StubPotential(*probe_);
+    }
+
+private:
+    Probe* probe_;
+    const OEChem::OEMolBase* molecule_ = nullptr;
+};
+
 }  // namespace
 
 TEST(MolFuncEngineTest, DeclaresOneGasPhaseMethod) {
@@ -96,7 +144,7 @@ TEST(MolFuncEngineTest, AnalyticHessianMatchesFiniteDifferences) {
     const std::size_t dim = x.size();
     ASSERT_EQ(evaluation.hessian.size(), dim * dim);
     const double step = 1e-4;
-    for (std::size_t k = 0; k < 6; ++k) {
+    for (std::size_t k = 0; k < dim; ++k) {
         std::vector<double> plus = x;
         std::vector<double> minus = x;
         plus[k] += step;
@@ -120,4 +168,35 @@ TEST(MolFuncEngineTest, FailedSetupIsUnsupported) {
     MolFuncEngine engine("molfunc-xenon", "1.0", Method("my-mmff"),
                          OEMolMMFF::OEMMFF(OEMolMMFF::OEMMFF94Params()));
     EXPECT_THROW(engine.CreateSession(system, settings_for("my-mmff")), UnsupportedError);
+}
+
+TEST(MolFuncEngineTest, UncopyablePrototypeIsRejected) {
+    StubPotential::Probe probe;
+    probe.copies_allowed = 0;
+    EXPECT_THROW(
+        MolFuncEngine("molfunc-uncopyable", "1.0", Method("my-mmff"), StubPotential(probe)),
+        OptionsError);
+}
+
+TEST(MolFuncEngineTest, UncopyableSessionPotentialIsUnsupported) {
+    const OEChem::OEMol mol = test::make_conformers("CCO");
+    const MolecularSystem system(mol, 0, 1);
+    StubPotential::Probe probe;
+    // The constructor takes the only copy, so the session's own copy comes back null.
+    probe.copies_allowed = 1;
+    MolFuncEngine engine("molfunc-one-copy", "1.0", Method("my-mmff"), StubPotential(probe));
+    EXPECT_THROW(engine.CreateSession(system, settings_for("my-mmff")), UnsupportedError);
+}
+
+TEST(MolFuncEngineTest, SessionDestroysPotentialBeforeItsMolecule) {
+    const OEChem::OEMol mol = test::make_conformers("CCO");
+    const MolecularSystem system(mol, 0, 1);
+    StubPotential::Probe probe;
+    {
+        MolFuncEngine engine("molfunc-lifetime", "1.0", Method("my-mmff"), StubPotential(probe));
+        auto session = engine.CreateSession(system, settings_for("my-mmff"));
+    }
+    // The potential reads the session's molecule while it is destroyed. A wrong member order reads
+    // freed memory, which AddressSanitizer reports and a plain debug build may hang on.
+    EXPECT_EQ(probe.atoms_at_destruction, system.NumAtoms());
 }

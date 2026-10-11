@@ -20,6 +20,8 @@ public:
     /// :param method: The one method this engine declares.
     /// :param prototype: Copied with ``CreateCopy()`` now; each session gets its own copy.
     /// :param requires_partial_charges: Declared in the method's capabilities.
+    /// :raises OptionsError: When ``prototype.CreateCopy()`` returns null, as some OpenEye wrapper
+    ///     potentials do; the engine could not give each session its own copy.
     MolFuncEngine(std::string name, std::string version, Method method,
                   const OEMolPotential::OEMolFunc1& prototype,
                   bool requires_partial_charges = false);
@@ -29,7 +31,7 @@ public:
     bool IsAvailable() const override;
     std::string GetUnavailableReason() const override;
     std::vector<MethodCapabilities> GetMethods() const override;
-    /// :raises UnsupportedError: When the potential cannot be set up on the system.
+    /// :raises UnsupportedError: When the potential cannot be copied or set up on the system.
     std::shared_ptr<EngineSession> CreateSession(const MolecularSystem& system,
                                                  const EngineSettings& settings) override;
 
