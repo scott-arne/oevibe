@@ -65,8 +65,12 @@ TEST(ConstraintMathTest, DihedralResidualsWrap) {
     dihedral.kind = ConstraintKind::DIHEDRAL;
     dihedral.atoms = {0, 1, 2, 3};
     const double value = detail::dihedral(x.data(), 0, 1, 2, 3, nullptr);
-    dihedral.target = detail::wrap_angle(value + 2.0 * Units::PI - 0.01);
-    EXPECT_NEAR(detail::constraint_residual(dihedral, x, nullptr), 0.01, 1e-12);
+    // The target lies 0.4 rad past +pi, so it wraps to the far side of the discontinuity and
+    // the raw difference exceeds pi; only a wrapped residual is small.
+    dihedral.target = detail::wrap_angle(value + 0.4);
+    ASSERT_GT(value - dihedral.target, Units::PI);
+    EXPECT_NEAR(detail::constraint_residual(dihedral, x, nullptr),
+                value - dihedral.target - 2.0 * Units::PI, 1e-12);
 }
 
 TEST(ConstraintMathTest, ResidualSummaryAndTolerances) {
@@ -100,7 +104,9 @@ TEST(ConstraintMathTest, RestraintEnergyAndGradient) {
     restraints[2].kind = RestraintKind::DIHEDRAL;
     restraints[2].atoms = {0, 1, 2, 3};
     restraints[2].force_constant = 2.0;
-    restraints[2].target = 3.0;
+    // Across the discontinuity from the geometry's dihedral (about 2.86 rad): the wrapped
+    // deviation is about -0.42 rad, far from the +-pi jump the finite-difference step must avoid.
+    restraints[2].target = -3.0;
     restraints[3].kind = RestraintKind::POSITION;
     restraints[3].atoms = {5};
     restraints[3].force_constant = 1.0;
@@ -111,6 +117,14 @@ TEST(ConstraintMathTest, RestraintEnergyAndGradient) {
     std::vector<double> gradient(x.size(), 0.0);
     const double energy = detail::restraint_energy(restraints, x, &gradient);
     EXPECT_GT(energy, expected_distance_term);
+
+    // The gradient check below cannot catch a missing wrap, because an unwrapped energy and its
+    // gradient are still consistent with each other, so pin the dihedral term's value.
+    const double phi = detail::dihedral(x.data(), 0, 1, 2, 3, nullptr);
+    const double wrapped_deviation = phi - restraints[2].target - 2.0 * Units::PI;
+    ASSERT_GT(phi - restraints[2].target, Units::PI);
+    EXPECT_NEAR(detail::restraint_energy({restraints[2]}, x, nullptr),
+                0.5 * restraints[2].force_constant * wrapped_deviation * wrapped_deviation, 1e-12);
 
     const double step = 1e-6;
     for (std::size_t k = 0; k < x.size(); ++k) {
