@@ -110,6 +110,27 @@ TEST(OEFFEngineTest, Mmff94EnergyMatchesOpenEye) {
     EXPECT_NEAR(energy_of(engine, system, MMFF94), direct(coords.data()), 1e-8);
 }
 
+// The engine selects the variant with a bare flag, so each method is pinned to OpenEye's own
+// parameter set on a delocalized nitrogen, where MMFF94 and MMFF94s differ.
+TEST(OEFFEngineTest, MmffVariantsMatchTheirOpenEyeParameterSets) {
+    const OEChem::OEMol mol = test::make_conformers("Nc1ccccc1");
+    const MolecularSystem system(mol, 0, 1);
+    OEFFEngine engine;
+    const auto direct_energy = [&mol](const OEMolMMFF::OEMMFFParams& params) {
+        OEMolMMFF::OEMMFF direct(params);
+        OEChem::OEMol copy(mol);
+        EXPECT_TRUE(direct.PrepMol(copy));
+        EXPECT_TRUE(direct.Setup(copy));
+        std::vector<double> coords(3 * copy.GetMaxAtomIdx());
+        copy.GetCoords(coords.data());
+        return direct(coords.data());
+    };
+    EXPECT_NEAR(energy_of(engine, system, MMFF94), direct_energy(OEMolMMFF::OEMMFF94Params()),
+                1e-8);
+    EXPECT_NEAR(energy_of(engine, system, MMFF94S), direct_energy(OEMolMMFF::OEMMFF94sParams()),
+                1e-8);
+}
+
 TEST(OEFFEngineTest, Mmff94sDiffersForADelocalizedNitrogen) {
     const OEChem::OEMol mol = test::make_conformers("Nc1ccccc1");
     const MolecularSystem system(mol, 0, 1);
