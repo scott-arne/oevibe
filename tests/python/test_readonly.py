@@ -6,7 +6,39 @@ import pytest
 from openeye import oechem
 
 import oevibe
-from oevibe.oevibe import BondOrder, BondOrderVector
+from oevibe.oevibe import (
+    BondOrder,
+    BondOrderVector,
+    DoubleVector,
+    StringStringMap,
+    StringVector,
+    UnsignedDoubleMap,
+    UnsignedVector,
+)
+
+_CONTAINERS = (
+    DoubleVector,
+    UnsignedVector,
+    StringVector,
+    StringStringMap,
+    UnsignedDoubleMap,
+    BondOrderVector,
+)
+
+# Each returns a C++ iterator into the container. Those from begin through upper_bound do not
+# keep the container alive; the others do, but changing the container leaves them dangling.
+_RAW_ITERATOR_METHODS = (
+    "begin",
+    "end",
+    "rbegin",
+    "rend",
+    "find",
+    "lower_bound",
+    "upper_bound",
+    "iterator",
+    "key_iterator",
+    "value_iterator",
+)
 
 # Indexing a BondOrderVector returns a pointer into its storage, which a reference to the vector
 # keeps allocated but not in place, so any of these would leave elements taken earlier dangling.
@@ -94,3 +126,52 @@ def test_bond_order_vector_reads_and_keeps_its_elements_alive():
 
     assert (element.i, element.j, element.order) == (0, 0, 0.0)
     assert len(reused) == 64
+
+
+def test_containers_hand_out_no_raw_iterators():
+    exposed = [
+        f"{cls.__name__}.{name}"
+        for cls in _CONTAINERS
+        for name in _RAW_ITERATOR_METHODS
+        if hasattr(cls, name)
+    ]
+    assert exposed == []
+
+
+def _one_entry_map(key, value):
+    table = UnsignedDoubleMap()
+    table[key] = value
+    return table
+
+
+def test_python_iteration_keeps_its_container_alive():
+    values = DoubleVector(3, 1.5)
+    table = _one_entry_map(1, 1.5)
+    value_iter = iter(values)
+    key_iter = iter(table)
+    item_iter = table.iteritems()
+    del values, table
+    gc.collect()
+    # Filled containers land in the memory just freed, so a dangling iterator would read 7 or 9.5.
+    reused_vectors = [DoubleVector(3, 9.5) for _ in range(64)]
+    reused_maps = [_one_entry_map(7, 9.5) for _ in range(64)]
+
+    assert next(value_iter) == 1.5
+    assert next(key_iter) == 1
+    assert next(item_iter) == (1, 1.5)
+    assert len(reused_vectors) == len(reused_maps) == 64
+
+
+def test_python_iteration_follows_no_stale_cxx_iterator():
+    # Neither change frees memory, so a C++ iterator would misread here instead of crashing.
+    values = DoubleVector(3, 1.5)
+    value_iter = iter(values)
+    values.clear()
+    # A C++ iterator would still yield the three cleared slots up to the end it captured.
+    assert list(value_iter) == []
+
+    table = _one_entry_map(1, 1.5)
+    key_iter = iter(table)
+    table[2] = 2.5
+    # A C++ iterator would also visit the key added after the iteration started.
+    assert list(key_iter) == [1]

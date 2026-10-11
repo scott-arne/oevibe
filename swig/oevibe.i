@@ -364,6 +364,11 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 // ============================================================================
 // STL support
 // ============================================================================
+// The C++-style iterator methods (begin, end, find, ...) return iterators that do not keep
+// their container alive, so they are not exported. This also drops the vectors' iterator() and
+// __iter__, so Python iterates a vector by index through __getitem__, which stays valid when the
+// vector reallocates.
+#define SWIG_NO_EXPORT_ITERATOR_METHODS
 %include "std_string.i"
 %include "std_vector.i"
 %include "std_map.i"
@@ -373,6 +378,31 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 %template(DoubleVector) std::vector<double>;
 %template(UnsignedVector) std::vector<unsigned int>;
 %template(StringVector) std::vector<std::string>;
+
+// Python iterates a map over a snapshot of its keys, values or items. The library's versions
+// hold a C++ iterator that erasing its entry leaves dangling, and its iteritems() calls the
+// iterator() method the define above removes.
+%define OEVIBE_SNAPSHOT_MAP_ITERATION(Map...)
+%ignore Map::key_iterator;
+%ignore Map::value_iterator;
+%extend Map {
+%pythoncode %{
+    def __iter__(self):
+        return iter(self.keys())
+
+    def iterkeys(self):
+        return iter(self.keys())
+
+    def itervalues(self):
+        return iter(self.values())
+
+    def iteritems(self):
+        return iter(self.items())
+%}
+}
+%enddef
+OEVIBE_SNAPSHOT_MAP_ITERATION(std::map<std::string, std::string>)
+OEVIBE_SNAPSHOT_MAP_ITERATION(std::map<unsigned int, double>)
 %template(StringStringMap) std::map<std::string, std::string>;
 %template(UnsignedDoubleMap) std::map<unsigned int, double>;
 
