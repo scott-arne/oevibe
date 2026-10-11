@@ -10,6 +10,10 @@
 
 namespace OEVIBE {
 
+namespace detail {
+class BuiltinRegistration;
+}  // namespace detail
+
 /// :returns: Whether the name is reserved for a built-in engine (``oeff``, ``tblite``, ``xtb``).
 bool is_builtin_engine_name(const std::string& name);
 
@@ -30,12 +34,17 @@ public:
     /// :raises EngineUnavailableError: When a built-in method's engine is not registered.
     /// :raises OptionsError: When no engine, or more than one, declares a non-built-in method.
     std::shared_ptr<Engine> ResolveForMethod(const Method& method) const;
-    /// Registers a built-in engine; only ``detail::register_builtin_engines`` calls this.
-    /// :raises OptionsError: For a null engine.
-    void RegisterBuiltin(std::shared_ptr<Engine> engine);
 
 private:
+    // The library's built-in registration, declared outside the public include tree.
+    friend class detail::BuiltinRegistration;
+
     EngineRegistry() = default;
+
+    /// Registers a built-in engine without ``Register``'s reserved-name and duplicate checks,
+    /// which is why only the library may call it.
+    /// :raises OptionsError: For a null engine.
+    void RegisterBuiltin(std::shared_ptr<Engine> engine);
 
     /// An engine with its name read once at registration. Engine code can be foreign (a Python
     /// engine needs the GIL), so nothing may call a virtual on an engine while ``mutex_`` is

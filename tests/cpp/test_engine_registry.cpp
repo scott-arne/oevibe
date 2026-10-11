@@ -4,8 +4,11 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
+#include "engines/Builtins.h"
 #include "oevibe/EngineRegistry.h"
 #include "oevibe/Error.h"
 #include "test_support.h"
@@ -26,6 +29,16 @@ public:
 
     mutable std::atomic<int> name_calls{0};
 };
+
+// Access checking is part of substitution, so a private RegisterBuiltin selects the primary
+// template.
+template <typename T, typename = void>
+struct HasPublicRegisterBuiltin : std::false_type {};
+
+template <typename T>
+struct HasPublicRegisterBuiltin<
+    T, std::void_t<decltype(std::declval<T&>().RegisterBuiltin(std::shared_ptr<Engine>()))>>
+    : std::true_type {};
 
 }  // namespace
 
@@ -124,6 +137,13 @@ TEST(EngineRegistryTest, LookupsDoNotCallEngineCodeUnderTheLock) {
     EXPECT_EQ(counted->name_calls.load(), 0);
 }
 
-TEST(EngineRegistryTest, RegisterBuiltinRejectsANullEngine) {
-    EXPECT_THROW(EngineRegistry::Instance().RegisterBuiltin(nullptr), OptionsError);
+// Built-in registration skips the reserved-name and duplicate checks, so a public entry point
+// would let any caller take over a built-in engine's routing.
+TEST(EngineRegistryTest, BuiltinRegistrationIsNotPublic) {
+    EXPECT_FALSE(HasPublicRegisterBuiltin<EngineRegistry>::value);
+}
+
+TEST(EngineRegistryTest, BuiltinRegistrationRejectsANullEngine) {
+    EXPECT_THROW(detail::BuiltinRegistration::Register(EngineRegistry::Instance(), nullptr),
+                 OptionsError);
 }
