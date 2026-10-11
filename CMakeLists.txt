@@ -118,6 +118,7 @@ set(OEVIBE_SOURCES
     src/core/ConstraintMath.cpp
     src/core/ModelHessian.cpp
     src/core/AncCoordinates.cpp
+    src/core/Lbfgs.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
