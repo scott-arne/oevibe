@@ -32,6 +32,7 @@ add_executable(oevibe_tests
     test_constraint_math.cpp
     test_model_hessian.cpp
     test_lbfgs.cpp
+    test_anc_rfo.cpp
 )
 
 target_link_libraries(oevibe_tests
