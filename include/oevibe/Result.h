@@ -48,8 +48,10 @@ struct Provenance {
 
 /// Wall time per stage, in seconds.
 struct Timings {
-    double setup = 0.0;
-    double compute = 0.0;
+    double setup = 0.0;    ///< The call's shared setup, the same for every conformer.
+    double compute = 0.0;  ///< This conformer's own computation.
+    /// Cumulative wall time from the start of the call to the end of this conformer, including
+    /// setup and every earlier conformer, so summing it over conformers overcounts.
     double total = 0.0;
 };
 
