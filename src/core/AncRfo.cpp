@@ -140,7 +140,8 @@ MinimizerResult anc_rfo_minimize(const ObjectiveFn& objective, std::vector<doubl
     MatrixXd hessian;
     unsigned since_rebuild = 0;
     const auto rebuild = [&]() {
-        basis = build_anc_basis(lindh_model_hessian(problem.atomic_numbers, x), x, problem.frozen);
+        basis = build_anc_basis(lindh_model_hessian(problem.atomic_numbers, x), x, problem.frozen,
+                                problem.rigid_invariant);
         hessian = basis.eigenvalues.asDiagonal();
         since_rebuild = 0;
     };

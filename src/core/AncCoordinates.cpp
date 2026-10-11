@@ -4,11 +4,11 @@ namespace OEVIBE {
 namespace detail {
 
 AncBasis build_anc_basis(const Eigen::MatrixXd& hessian, const std::vector<double>& x,
-                         const std::vector<unsigned>& frozen) {
+                         const std::vector<unsigned>& frozen, bool rigid_invariant) {
     const auto dim = static_cast<Eigen::Index>(x.size());
     const Eigen::Index atoms = dim / 3;
     std::vector<Eigen::VectorXd> excluded;
-    if (frozen.empty()) {
+    if (frozen.empty() && rigid_invariant) {
         Eigen::Vector3d center = Eigen::Vector3d::Zero();
         for (Eigen::Index a = 0; a < atoms; ++a) {
             center += Eigen::Vector3d(x[3 * a], x[3 * a + 1], x[3 * a + 2]);
@@ -35,16 +35,21 @@ AncBasis build_anc_basis(const Eigen::MatrixXd& hessian, const std::vector<doubl
             }
         }
     }
-    Eigen::MatrixXd span(dim, static_cast<Eigen::Index>(excluded.size()));
-    for (std::size_t c = 0; c < excluded.size(); ++c) {
-        span.col(static_cast<Eigen::Index>(c)) = excluded[c];
+    Eigen::MatrixXd complement;
+    if (excluded.empty()) {
+        complement = Eigen::MatrixXd::Identity(dim, dim);
+    } else {
+        Eigen::MatrixXd span(dim, static_cast<Eigen::Index>(excluded.size()));
+        for (std::size_t c = 0; c < excluded.size(); ++c) {
+            span.col(static_cast<Eigen::Index>(c)) = excluded[c];
+        }
+        // Column-pivoted QR finds the excluded rank, which drops to 5 for a linear molecule.
+        Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(span);
+        qr.setThreshold(1e-8);
+        const Eigen::Index rank = qr.rank();
+        const Eigen::MatrixXd q = qr.householderQ();
+        complement = q.rightCols(dim - rank);
     }
-    // Column-pivoted QR finds the excluded rank, which drops to 5 for a linear molecule.
-    Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(span);
-    qr.setThreshold(1e-8);
-    const Eigen::Index rank = qr.rank();
-    const Eigen::MatrixXd q = qr.householderQ();
-    const Eigen::MatrixXd complement = q.rightCols(dim - rank);
 
     AncBasis basis;
     if (complement.cols() == 0) {

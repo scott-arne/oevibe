@@ -1,5 +1,6 @@
 #include "core/Optimizer.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -110,6 +111,13 @@ OptimizationOutcome run_optimization(EngineSession& session, const OptimizationP
             anc.atomic_numbers = problem.atomic_numbers;
             anc.frozen = problem.constraints.frozen;
             anc.constraints = problem.constraints.constraints;
+            // A position restraint pins absolute position and orientation, so projecting out
+            // rigid-body motion would drop part of the restraint gradient (spec 7.1).
+            const std::vector<ResolvedRestraint>& restraints = problem.constraints.restraints;
+            anc.rigid_invariant = std::none_of(restraints.begin(), restraints.end(),
+                                               [](const ResolvedRestraint& restraint) {
+                                                   return restraint.kind == RestraintKind::POSITION;
+                                               });
             result = anc_rfo_minimize(objective, problem.x0, anc, settings);
         }
         // The cache may hold a rejected trial point; re-evaluating the final geometry is a

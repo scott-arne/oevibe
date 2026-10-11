@@ -87,6 +87,28 @@ TEST(AncBasisTest, LinearMoleculeKeeps3NMinus5Coordinates) {
     EXPECT_EQ(basis.vectors.cols(), 4);
 }
 
+TEST(AncBasisTest, RigidMotionIsKeptWhenTheObjectiveIsNotInvariant) {
+    const Molecule mol = ethanol();
+    const Eigen::MatrixXd hessian = detail::lindh_model_hessian(mol.numbers, mol.x);
+    const Eigen::Index dim = static_cast<Eigen::Index>(mol.x.size());
+    const detail::AncBasis basis = detail::build_anc_basis(hessian, mol.x, {}, false);
+    ASSERT_EQ(basis.vectors.cols(), dim);
+    const Eigen::MatrixXd gram = basis.vectors.transpose() * basis.vectors;
+    EXPECT_LT((gram - Eigen::MatrixXd::Identity(dim, dim)).cwiseAbs().maxCoeff(), 1e-10);
+    for (int axis = 0; axis < 3; ++axis) {
+        const Eigen::VectorXd shift = translation(mol.numbers.size(), axis).normalized();
+        EXPECT_NEAR((basis.vectors.transpose() * shift).norm(), 1.0, 1e-10);
+        const Eigen::VectorXd turn = rotation(mol.x, axis).normalized();
+        EXPECT_NEAR((basis.vectors.transpose() * turn).norm(), 1.0, 1e-10);
+    }
+    EXPECT_GE(basis.eigenvalues.minCoeff(), detail::MIN_ANC_EIGENVALUE);
+
+    // Frozen atoms are still excluded.
+    const detail::AncBasis pinned = detail::build_anc_basis(hessian, mol.x, {0}, false);
+    ASSERT_EQ(pinned.vectors.cols(), dim - 3);
+    EXPECT_LT(pinned.vectors.topRows(3).cwiseAbs().maxCoeff(), 1e-12);
+}
+
 TEST(AncBasisTest, FrozenAtomsAreExcluded) {
     const Molecule mol = ethanol();
     const detail::AncBasis basis =

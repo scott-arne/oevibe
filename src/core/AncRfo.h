@@ -15,6 +15,9 @@ struct AncRfoProblem {
     std::vector<unsigned> atomic_numbers;  ///< Dense order, for the model Hessian.
     std::vector<unsigned> frozen;          ///< Dense indices.
     std::vector<ResolvedConstraint> constraints;
+    /// False when the objective changes under rigid-body motion (a position restraint), so the
+    /// coordinates must keep translations and rotations even with no atom frozen.
+    bool rigid_invariant = true;
 };
 
 struct RfoStep {

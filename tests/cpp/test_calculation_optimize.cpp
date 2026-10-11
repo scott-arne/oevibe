@@ -164,6 +164,35 @@ TEST(CalculationOptimizeTest, ConstraintContentEntersProvenanceAndDigest) {
     EXPECT_EQ(with_restraints.resolved_options.at("optimizer.constraints"), "");
 }
 
+// A position restraint breaks rigid-body invariance; ANC_RFO used to project translations and
+// rotations out anyway and stopped short of the restrained minimum LBFGS finds.
+TEST(CalculationOptimizeTest, PositionRestraintGivesTheSameMinimumWithBothAlgorithms) {
+    OEChem::OEMol mol = test::make_conformers("CCCCO");
+    jitter(mol);
+    ConstraintSet anchored;
+    anchored.AddPositionRestraint(0, 10.0);
+    double totals[2];
+    double restraint_energies[2];
+    int slot = 0;
+    for (Algorithm algorithm : {Algorithm::LBFGS, Algorithm::ANC_RFO}) {
+        SCOPED_TRACE(algorithm_name(algorithm));
+        OEChem::OEMol copy(mol);
+        OptimizerOptions options;
+        options.SetAlgorithm(algorithm);
+        options.SetConstraints(anchored);
+        options.SetGradientNormThreshold(0.01);
+        options.SetEnergyChangeThreshold(1e-7);
+        const ResultSet results = Calculation(mmff94()).Optimize(copy, options);
+        const ConformerResult& result = results.Get(0);
+        ASSERT_EQ(result.GetStatus(), ConformerStatus::OK) << result.GetMessage();
+        restraint_energies[slot] = result.GetOptimizationStats().restraint_energy;
+        totals[slot++] = result.GetEnergy() + result.GetOptimizationStats().restraint_energy;
+    }
+    EXPECT_LT(restraint_energies[0], 1e-4);
+    EXPECT_LT(restraint_energies[1], 1e-4);
+    EXPECT_NEAR(totals[0], totals[1], 1e-3);
+}
+
 TEST(CalculationOptimizeTest, OptionAndInputErrorsComeFirst) {
     OEChem::OEMol mol = test::make_conformers("CCO");
     OptimizerOptions lbfgs;

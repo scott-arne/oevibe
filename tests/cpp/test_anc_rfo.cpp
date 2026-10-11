@@ -92,6 +92,37 @@ TEST(AncRfoTest, FrozenAtomsNeverMove) {
     }
 }
 
+// An energy term tied to absolute position, like a position restraint, is only minimized when
+// the coordinates include translation.
+TEST(AncRfoTest, TranslatesTheMoleculeWhenTheObjectiveIsNotRigidInvariant) {
+    const std::vector<double> reference = test::sample_geometry();
+    std::vector<double> start = reference;
+    for (std::size_t k = 0; k < start.size(); k += 3) {
+        start[k] += 0.3;
+        start[k + 1] -= 0.2;
+    }
+    const double anchor = 10.0;  // kcal/mol/Angstrom^2 on atom 0
+    const detail::ObjectiveFn objective = [reference, anchor](const std::vector<double>& x,
+                                                              std::vector<double>& g) {
+        double energy = test::spring_energy(reference, x, 50.0, &g);
+        for (int axis = 0; axis < 3; ++axis) {
+            const double d = x[axis] - reference[axis];
+            energy += 0.5 * anchor * d * d;
+            g[axis] += anchor * d;
+        }
+        return energy;
+    };
+    detail::AncRfoProblem problem = carbons(6);
+    problem.rigid_invariant = false;
+    const detail::MinimizerResult result =
+        detail::anc_rfo_minimize(objective, start, problem, tight());
+    ASSERT_TRUE(result.converged) << result.message;
+    EXPECT_LT(result.energy, 1e-5);
+    for (int axis = 0; axis < 3; ++axis) {
+        EXPECT_NEAR(result.x[axis], reference[axis], 1e-3);
+    }
+}
+
 TEST(AncRfoTest, SatisfiesAnUnsatisfiedDistanceConstraint) {
     const std::vector<double> reference = test::sample_geometry();
     detail::AncRfoProblem problem = carbons(6);

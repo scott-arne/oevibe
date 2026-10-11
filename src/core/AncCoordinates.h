@@ -18,10 +18,15 @@ struct AncBasis {
 };
 
 /// Diagonalizes the model Hessian in the subspace orthogonal to rigid-body motion (when no atom
-/// is frozen) or to the frozen atoms' displacements. Rigid rotation is kept when atoms are
-/// frozen because frozen atoms break rotational invariance.
+/// is frozen and the objective is rigid-body invariant) or to the frozen atoms' displacements.
+/// Rigid rotation is kept when atoms are frozen because frozen atoms break rotational
+/// invariance.
+///
+/// :param rigid_invariant: False when the objective changes under rigid-body motion, as with a
+///     position restraint; translations and rotations then stay in the basis, which spans the
+///     full Cartesian space when no atom is frozen either.
 AncBasis build_anc_basis(const Eigen::MatrixXd& hessian, const std::vector<double>& x,
-                         const std::vector<unsigned>& frozen);
+                         const std::vector<unsigned>& frozen, bool rigid_invariant = true);
 
 }  // namespace detail
 }  // namespace OEVIBE
