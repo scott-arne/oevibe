@@ -107,6 +107,8 @@ set(OEVIBE_SOURCES
     src/core/Sha256.cpp
     src/Calculation.cpp
     src/core/WriteBack.cpp
+    src/core/Geometry.cpp
+    src/core/ConstraintMath.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

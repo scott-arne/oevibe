@@ -95,6 +95,20 @@ inline double spring_energy(const std::vector<double>& reference, const std::vec
     return energy;
 }
 
+/// A non-planar six-atom geometry in Angstrom for numerical tests.
+inline std::vector<double> sample_geometry() {
+    return {0.000, 0.000, 0.000, 1.530,  0.000,  0.000, 2.040, 1.440,  0.000,
+            3.570, 1.440, 0.420, -0.510, -0.880, 0.510, 1.980, -0.700, -0.880};
+}
+
+/// Deterministic perturbation so tests start away from the reference.
+inline std::vector<double> perturbed(std::vector<double> x, double amplitude) {
+    for (std::size_t k = 0; k < x.size(); ++k) {
+        x[k] += amplitude * std::sin(1.7 * static_cast<double>(k) + 0.3);
+    }
+    return x;
+}
+
 enum class FakeMode { HARMONIC, THROW_UNSUPPORTED, THROW_RUNTIME, MALFORMED_GRADIENT };
 
 /// Session of ``FakeEngine``: spring network around conformer 0, plus fixed properties.
