@@ -104,6 +104,8 @@ set(OEVIBE_SOURCES
     src/core/MolFuncSession.cpp
     src/OEAdapters.cpp
     src/engines/OEFFEngine.cpp
+    src/Result.cpp
+    src/core/Sha256.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

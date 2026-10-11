@@ -1,0 +1,162 @@
+#ifndef OEVIBE_RESULT_H
+#define OEVIBE_RESULT_H
+
+#include <oechem.h>
+
+#include <cstddef>
+#include <map>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "oevibe/Property.h"
+
+namespace OEVIBE {
+
+// NOLINTBEGIN(performance-enum-size)
+/// Per-conformer outcome; a failure never aborts the other conformers (spec 7.5).
+enum class ConformerStatus { OK, NOT_CONVERGED, ENGINE_ERROR, UNSUPPORTED };
+// NOLINTEND(performance-enum-size)
+
+/// :returns: The enumerator name, used in SD tags and messages.
+std::string conformer_status_name(ConformerStatus status);
+
+/// Optimizer outcome (spec 5.7). Gradient values are of the projected gradient.
+struct OptimizationStats {
+    unsigned iterations = 0;
+    unsigned gradient_evaluations = 0;
+    bool converged = false;
+    double energy_change = 0.0;           ///< kcal/mol, last accepted step
+    double gradient_norm = 0.0;           ///< kcal/mol/Angstrom
+    double max_gradient_component = 0.0;  ///< kcal/mol/Angstrom
+    double max_distance_residual = 0.0;   ///< Angstrom
+    double max_angle_residual = 0.0;      ///< degrees, angles and dihedrals
+    double restraint_energy = 0.0;        ///< kcal/mol, excluded from reported energies
+};
+
+/// Where a result came from (spec 5.7).
+struct Provenance {
+    std::string method;
+    std::string engine;
+    std::string engine_version;
+    std::string solvent_model;  ///< ``gas`` or the resolved model name.
+    std::string solvent;        ///< Empty for gas phase.
+    std::map<std::string, std::string> resolved_options;
+    std::string options_digest;
+};
+
+/// Wall time per stage, in seconds.
+struct Timings {
+    double setup = 0.0;
+    double compute = 0.0;
+    double total = 0.0;
+};
+
+/// One conformer's result. Atom-indexed arrays use the OpenEye layout (spec 3.1). Absent
+/// values throw ``OEVibeError`` from their getters.
+class ConformerResult {
+public:
+    unsigned GetConformerIndex() const;
+    void SetConformerIndex(unsigned index);
+    ConformerStatus GetStatus() const;
+    const std::string& GetMessage() const;
+    void SetStatus(ConformerStatus status, const std::string& message);
+    std::vector<std::string> GetWarnings() const;
+    void AddWarning(const std::string& warning);
+    /// :returns: The OpenEye atom index of each dense position.
+    std::vector<unsigned> GetAtomIndices() const;
+    void SetAtomIndices(const std::vector<unsigned>& indices);
+
+    bool HasEnergy() const;
+    double GetEnergy() const;  ///< kcal/mol
+    void SetEnergy(double energy);
+    bool HasRelativeEnergy() const;
+    double GetRelativeEnergy() const;  ///< kcal/mol, set by the owning ResultSet
+    void SetRelativeEnergy(double energy);
+    void ClearRelativeEnergy();
+    bool HasCoordinates() const;
+    std::vector<double> GetCoordinates() const;  ///< Angstrom, OpenEye layout
+    void SetCoordinates(const std::vector<double>& coordinates);
+    bool HasGradient() const;
+    std::vector<double> GetGradient() const;  ///< kcal/mol/Angstrom, OpenEye layout
+    void SetGradient(const std::vector<double>& gradient);
+    bool HasCharges() const;
+    std::vector<double> GetCharges() const;  ///< e, OpenEye layout
+    double GetCharge(const OEChem::OEAtomBase& atom) const;
+    void SetCharges(const std::vector<double>& charges);
+    bool HasDipole() const;
+    std::vector<double> GetDipole() const;  ///< Debye, (x, y, z)
+    void SetDipole(const std::vector<double>& dipole);
+    bool HasOrbitalEnergies() const;
+    std::vector<double> GetOrbitalEnergies() const;  ///< eV, ascending
+    bool HasHOMO() const;
+    double GetHOMO() const;
+    bool HasLUMO() const;
+    double GetLUMO() const;
+    void SetOrbitalEnergies(const std::vector<double>& energies, int homo_index);
+    bool HasBondOrders() const;
+    /// :returns: Bond orders keyed by OpenEye atom indices with ``i < j``.
+    std::vector<BondOrder> GetBondOrders() const;
+    /// :returns: The bond order, or 0 for a pair without one.
+    double GetBondOrder(unsigned oe_a, unsigned oe_b) const;
+    double GetBondOrder(const OEChem::OEBondBase& bond) const;
+    void SetBondOrders(const std::vector<BondOrder>& orders);
+    bool HasOptimizationStats() const;
+    const OptimizationStats& GetOptimizationStats() const;
+    void SetOptimizationStats(const OptimizationStats& stats);
+    const Provenance& GetProvenance() const;
+    void SetProvenance(const Provenance& provenance);
+    const Timings& GetTimings() const;
+    void SetTimings(const Timings& timings);
+
+private:
+    unsigned conformer_index_ = 0;
+    ConformerStatus status_ = ConformerStatus::ENGINE_ERROR;
+    std::string message_;
+    std::vector<std::string> warnings_;
+    std::vector<unsigned> atom_indices_;
+    std::optional<double> energy_;
+    std::optional<double> relative_energy_;
+    std::optional<std::vector<double>> coordinates_;
+    std::optional<std::vector<double>> gradient_;
+    std::optional<std::vector<double>> charges_;
+    std::optional<std::vector<double>> dipole_;
+    std::optional<std::vector<double>> orbital_energies_;
+    int homo_index_ = -1;
+    std::optional<std::map<std::pair<unsigned, unsigned>, double>> bond_orders_;
+    std::optional<OptimizationStats> optimization_stats_;
+    Provenance provenance_;
+    Timings timings_;
+};
+
+/// Results of one calculation call, one per input conformer in input order (spec 5.7).
+class ResultSet {
+public:
+    std::size_t Size() const;
+    /// :raises OEVibeError: For an index past the end.
+    const ConformerResult& Get(std::size_t index) const;
+    bool HasLowest() const;
+    /// :returns: The lowest-energy OK conformer; ties go to the lowest conformer index.
+    /// :raises OEVibeError: When no conformer is OK.
+    const ConformerResult& GetLowest() const;
+    /// :returns: Conformer index to relative energy (kcal/mol) over OK conformers.
+    std::map<unsigned, double> GetRelativeEnergies() const;
+    /// Weights over OK conformers from electronic energies,
+    /// w_i = exp(-(E_i - E_min) / RT) / sum_j exp(-(E_j - E_min) / RT). Plan B adds free
+    /// energies when thermochemistry is present.
+    /// :raises OEVibeError: Unless the temperature is finite and greater than 0.
+    std::map<unsigned, double> GetBoltzmannWeights(double temperature) const;
+
+    void Add(ConformerResult result);
+    /// Sets each OK conformer's relative energy; call once after the last ``Add``.
+    void Finalize();
+    void AddWarningToAll(const std::string& warning);
+
+private:
+    std::vector<ConformerResult> results_;
+};
+
+}  // namespace OEVIBE
+
+#endif  // OEVIBE_RESULT_H
