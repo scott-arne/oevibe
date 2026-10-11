@@ -24,6 +24,7 @@ add_executable(oevibe_tests
     test_engine.cpp
     test_engine_registry.cpp
     test_molfunc_engine.cpp
+    test_oeff_engine.cpp
 )
 
 target_link_libraries(oevibe_tests
