@@ -219,6 +219,14 @@ Calculation::Calculation(const CalculationOptions& options) : options_(options) 
     capabilities_ = *caps;
     settings_.method = options_.GetMethod();
     settings_.solvent = resolve_solvent(options_.GetSolvent(), capabilities_);
+    // Spec 10 records solvent model resolution per result, so the model AUTO chose is visible
+    // without reading the provenance.
+    if (!settings_.solvent.IsGasPhase() && options_.GetSolvent().GetModel() == SolventModel::AUTO) {
+        solvent_warning_ = "solvent model AUTO resolved to '" +
+                           solvent_model_name(settings_.solvent.GetModel()) + "' for solvent '" +
+                           settings_.solvent.GetName() + "', the default of method '" +
+                           options_.GetMethod().GetName() + "'";
+    }
     settings_.preset = options_.GetPreset();
     settings_.accuracy = preset_values(settings_.preset).engine_accuracy;
     settings_.properties = options_.GetEffectiveProperties();
@@ -291,6 +299,9 @@ ConformerResult Calculation::NewResult(const CallState& state, unsigned position
     result.SetAtomIndices(state.system->GetOEAtomIndices());
     for (const std::string& warning : state.input.warnings) {
         result.AddWarning(warning);
+    }
+    if (!solvent_warning_.empty()) {
+        result.AddWarning(solvent_warning_);
     }
     Provenance provenance;
     provenance.method = settings_.method.GetName();

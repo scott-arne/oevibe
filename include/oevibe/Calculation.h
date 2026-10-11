@@ -58,6 +58,7 @@ private:
     std::string engine_version_;  // Read once at construction, where failures may throw.
     MethodCapabilities capabilities_;
     EngineSettings settings_;
+    std::string solvent_warning_;  // Set when AUTO was resolved; copied into every result.
 };
 
 }  // namespace OEVIBE

@@ -185,6 +185,36 @@ TEST(CalculationTest, NullSessionsBecomeEngineErrors) {
     }
 }
 
+TEST(CalculationTest, AutoSolventResolutionIsRecordedAsAWarning) {
+    OEChem::OEMol mol = test::make_conformers("CCCCO", 2);
+    CalculationOptions options;
+    options.SetMethod(Method(MMFF94));
+    options.SetSolvent(Solvent("water"));
+    const auto names_the_resolution = [](const ConformerResult& result) {
+        for (const std::string& warning : result.GetWarnings()) {
+            if (contains(warning, "water") && contains(warning, "sheffield")) {
+                return true;
+            }
+        }
+        return false;
+    };
+    Calculation calc(options);
+    for (const bool gradient : {false, true}) {
+        SCOPED_TRACE(gradient ? "gradient" : "energy");
+        const ResultSet results = gradient ? calc.Gradient(mol) : calc.Energy(mol);
+        ASSERT_EQ(results.Size(), mol.NumConfs());
+        for (std::size_t i = 0; i < results.Size(); ++i) {
+            EXPECT_TRUE(names_the_resolution(results.Get(i)));
+        }
+    }
+
+    // Nothing was resolved for an explicit model or for gas phase.
+    options.SetSolvent(Solvent("water", SolventModel::SHEFFIELD));
+    EXPECT_TRUE(Calculation(options).Energy(mol).Get(0).GetWarnings().empty());
+    options.SetSolvent(Solvent());
+    EXPECT_TRUE(Calculation(options).Energy(mol).Get(0).GetWarnings().empty());
+}
+
 TEST(CalculationTest, PartialChargeWriteBackIgnoresConformerOrder) {
     auto engine = test::register_fake("calc-charges");
     CalculationOptions options = fake_options("calc-charges");

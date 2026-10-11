@@ -2,6 +2,7 @@
 
 #include <oechem.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -319,6 +320,21 @@ TEST(CalculationOptimizeTest, NullSessionsBecomeEngineErrors) {
         EXPECT_FALSE(result.HasOptimizationStats());
     }
     EXPECT_EQ(coordinates_of(*mol.GetActive()), before);
+}
+
+TEST(CalculationOptimizeTest, AutoSolventResolutionIsRecordedAsAWarning) {
+    OEChem::OEMol mol = test::make_conformers("CCCCO", 2);
+    CalculationOptions options = mmff94();
+    options.SetSolvent(Solvent("water"));
+    const ResultSet results = Calculation(options).Optimize(mol, OptimizerOptions());
+    ASSERT_EQ(results.Size(), mol.NumConfs());
+    for (std::size_t i = 0; i < results.Size(); ++i) {
+        const std::vector<std::string> warnings = results.Get(i).GetWarnings();
+        EXPECT_TRUE(std::any_of(warnings.begin(), warnings.end(), [](const std::string& warning) {
+            return warning.find("water") != std::string::npos &&
+                   warning.find("sheffield") != std::string::npos;
+        }));
+    }
 }
 
 TEST(CalculationOptimizeTest, IterationLimitGivesNotConverged) {
