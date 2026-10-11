@@ -32,10 +32,10 @@ std::unique_ptr<OEMolPotential::OEMolFunc1> make_potential(const EngineSettings&
                                               : OEFF::OEMMFFSheffieldFFType::MMFF_SHEFF);
             return std::make_unique<OEFF::OEMMFFSheffield>(options);
         }
-        if (mmff94s) {
-            return std::make_unique<OEMolMMFF::OEMMFF>(OEMolMMFF::OEMMFF94sParams());
-        }
-        return std::make_unique<OEMolMMFF::OEMMFF>(OEMolMMFF::OEMMFF94Params());
+        // This uses the deprecated flag constructor because one built from OEMMFF94Params or
+        // OEMMFF94sParams fails Setup ("Ligand has no partial charges") when every MMFF charge
+        // is zero, as for any alkane. Both give the same energy wherever both set up.
+        return std::make_unique<OEMolMMFF::OEMMFF>(mmff94s);
     }
     if (method == SAGE) {
         return std::make_unique<OEMolSmirnoff::OESage>();

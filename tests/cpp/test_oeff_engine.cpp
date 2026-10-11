@@ -118,6 +118,15 @@ TEST(OEFFEngineTest, Mmff94sDiffersForADelocalizedNitrogen) {
               1e-6);
 }
 
+// Every MMFF partial charge of an alkane is zero, which OpenEye's charge check reads as absent.
+TEST(OEFFEngineTest, MmffRunsOnHydrocarbons) {
+    const OEChem::OEMol mol = test::make_conformers("CCCC");
+    const MolecularSystem system(mol, 0, 1);
+    OEFFEngine engine;
+    EXPECT_TRUE(std::isfinite(energy_of(engine, system, MMFF94)));
+    EXPECT_TRUE(std::isfinite(energy_of(engine, system, MMFF94S)));
+}
+
 TEST(OEFFEngineTest, SheffieldWaterChangesTheEnergy) {
     const OEChem::OEMol mol = test::make_conformers("CCO");
     const MolecularSystem system(mol, 0, 1);
