@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "core/ConstraintMath.h"
 #include "oevibe/Calculation.h"
 #include "oevibe/Error.h"
 #include "oevibe/Units.h"
@@ -21,6 +22,46 @@ CalculationOptions mmff94() {
     CalculationOptions options;
     options.SetMethod(Method(MMFF94));
     return options;
+}
+
+CalculationOptions fake_options(const std::string& engine) {
+    CalculationOptions options;
+    options.SetMethod(Method("fake-method"));
+    options.SetEngine(engine);
+    return options;
+}
+
+// Acetylene laid out on the x axis, so both H-C-C bends are exactly linear: the cross product of
+// their bond vectors is exactly zero, where an angle has no derivative. Atoms are C0, C1, H2 on
+// C0, and H3 on C1.
+OEChem::OEMol make_linear_acetylene() {
+    OEChem::OEMol mol;
+    OEChem::OEAtomBase* c0 = mol.NewAtom(6);
+    OEChem::OEAtomBase* c1 = mol.NewAtom(6);
+    OEChem::OEAtomBase* h2 = mol.NewAtom(1);
+    OEChem::OEAtomBase* h3 = mol.NewAtom(1);
+    mol.NewBond(c0, c1, 3);
+    mol.NewBond(c0, h2, 1);
+    mol.NewBond(c1, h3, 1);
+    const double coords[12] = {-0.60, 0.0, 0.0, 0.60, 0.0, 0.0, -1.66, 0.0, 0.0, 1.66, 0.0, 0.0};
+    mol.SetCoords(coords);
+    mol.SetDimension(3);
+    return mol;
+}
+
+// Computed independently of the optimizer's geometry code.
+double bend_degrees(const std::vector<double>& x, unsigned i, unsigned j, unsigned k) {
+    double dot = 0.0;
+    double uu = 0.0;
+    double vv = 0.0;
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        const double u = x[3 * i + axis] - x[3 * j + axis];
+        const double v = x[3 * k + axis] - x[3 * j + axis];
+        dot += u * v;
+        uu += u * u;
+        vv += v * v;
+    }
+    return std::acos(std::clamp(dot / std::sqrt(uu * vv), -1.0, 1.0)) * Units::RADIANS_TO_DEGREES;
 }
 
 std::vector<double> coordinates_of(const OEChem::OEMolBase& conf) {
@@ -363,4 +404,95 @@ TEST(CalculationOptimizeTest, NonForceFieldEnginesUseAncRfo) {
         EXPECT_LT(results.Get(i).GetEnergy(), 0.05);
     }
     EXPECT_EQ(results.Get(0).GetProvenance().resolved_options.at("optimizer.algorithm"), "anc_rfo");
+}
+
+// A linear bend has no angle derivative. A restraint toward another angle used to see a zero
+// gradient there, so a stationary linear start "converged" with the restraint unsatisfied.
+TEST(CalculationOptimizeTest, AngleRestraintBendsAnExactlyLinearStart) {
+    // The fake engine's springs hold the starting geometry, so the start is stationary.
+    test::register_fake("optimize-linear-restraint");
+    const double start_deviation = 60.0 * Units::DEGREES_TO_RADIANS;
+    const double start_restraint_energy = 0.5 * 50.0 * start_deviation * start_deviation;
+    for (Algorithm algorithm : {Algorithm::LBFGS, Algorithm::ANC_RFO}) {
+        SCOPED_TRACE(algorithm_name(algorithm));
+        OEChem::OEMol mol = make_linear_acetylene();
+        ConstraintSet bend;
+        bend.AddAngleRestraint(2, 0, 1, 50.0, 120.0);
+        OptimizerOptions options;
+        options.SetAlgorithm(algorithm);
+        options.SetConstraints(bend);
+        const ResultSet results =
+            Calculation(fake_options("optimize-linear-restraint")).Optimize(mol, options);
+        const ConformerResult& result = results.Get(0);
+        ASSERT_EQ(result.GetStatus(), ConformerStatus::OK) << result.GetMessage();
+        const OptimizationStats& stats = result.GetOptimizationStats();
+        EXPECT_GE(stats.iterations, 1u);
+        EXPECT_LT(stats.restraint_energy, 0.5 * start_restraint_energy);
+        EXPECT_LT(bend_degrees(result.GetCoordinates(), 2, 0, 1), 160.0);
+    }
+}
+
+// An exact constraint away from 180 degrees used to have no correction direction at a linear
+// bend and spent the whole iteration budget there.
+TEST(CalculationOptimizeTest, AngleConstraintBendsAnExactlyLinearStart) {
+    test::register_fake("optimize-linear-constraint");
+    OEChem::OEMol mol = make_linear_acetylene();
+    ConstraintSet bend;
+    bend.AddAngle(2, 0, 1, 120.0);
+    OptimizerOptions options;
+    options.SetConstraints(bend);
+    const ResultSet results =
+        Calculation(fake_options("optimize-linear-constraint")).Optimize(mol, options);
+    const ConformerResult& result = results.Get(0);
+    ASSERT_EQ(result.GetStatus(), ConformerStatus::OK) << result.GetMessage();
+    EXPECT_EQ(result.GetProvenance().resolved_options.at("optimizer.algorithm"), "anc_rfo");
+    EXPECT_LE(result.GetOptimizationStats().max_angle_residual, detail::ANGLE_RESIDUAL_TOLERANCE);
+    EXPECT_NEAR(bend_degrees(result.GetCoordinates(), 2, 0, 1), 120.0,
+                detail::ANGLE_RESIDUAL_TOLERANCE);
+}
+
+// A target of 180 degrees is already met at a linear bend, so whatever direction stands in for
+// the missing derivative must not push the geometry off linearity while the bonds relax.
+TEST(CalculationOptimizeTest, LinearAngleTargetsKeepALinearGeometryLinear) {
+    const std::shared_ptr<test::FakeEngine> engine = test::register_fake("optimize-linear-target");
+    const OEChem::OEMol start = make_linear_acetylene();
+    const std::vector<double> start_x = MolecularSystem(start, 0, 1).GetConformerCoordinates(0);
+    // Shorter springs along the same axis, so the bonds must relax while the bends stay linear.
+    engine->reference = start_x;
+    for (std::size_t k = 0; k < engine->reference.size(); k += 3) {
+        engine->reference[k] *= 0.9;
+    }
+    const double start_energy =
+        test::spring_energy(engine->reference, start_x, engine->force_constant, nullptr);
+    struct Case {
+        const char* name;
+        Algorithm algorithm;
+        bool exact;
+    };
+    for (const Case& item : {Case{"restraint, lbfgs", Algorithm::LBFGS, false},
+                             Case{"restraint, anc_rfo", Algorithm::ANC_RFO, false},
+                             Case{"constraint, anc_rfo", Algorithm::ANC_RFO, true}}) {
+        SCOPED_TRACE(item.name);
+        OEChem::OEMol mol(start);
+        ConstraintSet linear;
+        if (item.exact) {
+            linear.AddAngle(2, 0, 1, 180.0);
+        } else {
+            linear.AddAngleRestraint(2, 0, 1, 50.0, 180.0);
+        }
+        OptimizerOptions options;
+        options.SetAlgorithm(item.algorithm);
+        options.SetConstraints(linear);
+        const ResultSet results =
+            Calculation(fake_options("optimize-linear-target")).Optimize(mol, options);
+        const ConformerResult& result = results.Get(0);
+        ASSERT_EQ(result.GetStatus(), ConformerStatus::OK) << result.GetMessage();
+        const OptimizationStats& stats = result.GetOptimizationStats();
+        EXPECT_GE(stats.iterations, 1u);
+        EXPECT_LT(result.GetEnergy(), 1e-2 * start_energy);
+        EXPECT_NEAR(bend_degrees(result.GetCoordinates(), 2, 0, 1), 180.0,
+                    detail::ANGLE_RESIDUAL_TOLERANCE);
+        EXPECT_LT(stats.restraint_energy, 1e-12);
+        EXPECT_LE(stats.max_angle_residual, detail::ANGLE_RESIDUAL_TOLERANCE);
+    }
 }

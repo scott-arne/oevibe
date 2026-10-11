@@ -12,9 +12,14 @@ double wrap_angle(double radians);
 double distance(const double* x, unsigned i, unsigned j, double* gradient);
 
 /// Angle i-j-k in radians, in [0, pi].
-/// :param gradient: When not null, receives 9 values; zero within 1e-8 of 0 or pi, where the
-///     derivative is undefined.
+/// :param gradient: When not null, receives 9 values. At a linear bend (``is_linear_bend``),
+///     where the derivative is undefined, they are the one-sided derivative for bending toward a
+///     fixed direction perpendicular to i-j; zero when j coincides with i or k.
 double angle(const double* x, unsigned i, unsigned j, unsigned k, double* gradient);
+
+/// :returns: Whether ``theta``, from ``angle``, lies within 1e-8 (in sin) of 0 or pi, where
+///     ``angle`` returns a one-sided derivative.
+bool is_linear_bend(double theta);
 
 /// Dihedral i-j-k-l in radians, in (-pi, pi], with the IUPAC sign.
 /// :param gradient: When not null, receives 12 values (Blondel and Karplus, J. Comput. Chem.

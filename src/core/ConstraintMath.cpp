@@ -56,6 +56,21 @@ std::vector<unsigned> to_dense(const std::vector<unsigned>& atoms, const Molecul
     return dense;
 }
 
+// At a linear bend ``angle`` returns the one-sided derivative for bending away from linearity,
+// which describes only a term that asks the bend to open (from pi) or unfold (from 0). Any
+// other term is as close to its target as the angle can get, and its true gradient vanishes
+// there. Keeping the fixed escape direction for it would push the geometry off linearity
+// whenever rounding bends it the other way, so it gets a zero gradient.
+void drop_unwanted_escape(ConstraintKind kind, double value, double deviation, double* local) {
+    if (kind != ConstraintKind::ANGLE || !is_linear_bend(value)) {
+        return;
+    }
+    const bool asks_to_leave = value > 0.5 * Units::PI ? deviation > 0.0 : deviation < 0.0;
+    if (!asks_to_leave) {
+        std::fill(local, local + 9, 0.0);
+    }
+}
+
 // Targets are stored in degrees on the public side and in radians here.
 double target_in_internal_units(ConstraintKind kind, double target) {
     return kind == ConstraintKind::DISTANCE ? target : target * Units::DEGREES_TO_RADIANS;
@@ -122,12 +137,16 @@ double constraint_residual(const ResolvedConstraint& constraint, const std::vect
     double local[12];
     const double value = value_and_local_gradient(constraint.kind, constraint.atoms, x.data(),
                                                   jacobian_row != nullptr ? local : nullptr);
+    double residual = value - constraint.target;
+    if (constraint.kind == ConstraintKind::DIHEDRAL) {
+        residual = wrap_angle(residual);
+    }
     if (jacobian_row != nullptr) {
+        drop_unwanted_escape(constraint.kind, value, residual, local);
         jacobian_row->assign(x.size(), 0.0);
         scatter(constraint.atoms, local, 1.0, *jacobian_row);
     }
-    const double residual = value - constraint.target;
-    return constraint.kind == ConstraintKind::DIHEDRAL ? wrap_angle(residual) : residual;
+    return residual;
 }
 
 ResidualSummary summarize_residuals(const std::vector<ResolvedConstraint>& constraints,
@@ -174,6 +193,7 @@ double restraint_energy(const std::vector<ResolvedRestraint>& restraints,
         }
         energy += 0.5 * restraint.force_constant * deviation * deviation;
         if (gradient != nullptr) {
+            drop_unwanted_escape(geometry, value, deviation, local);
             scatter(restraint.atoms, local, restraint.force_constant * deviation, *gradient);
         }
     }

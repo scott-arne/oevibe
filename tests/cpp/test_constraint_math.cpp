@@ -104,6 +104,57 @@ TEST(ConstraintMathTest, ResidualSummaryAndTolerances) {
     EXPECT_TRUE(detail::residuals_satisfied(detail::summarize_residuals({bond}, x)));
 }
 
+// At a linear bend, a term targeting another angle needs a direction to leave linearity, while
+// one targeting 180 degrees is satisfied and must exert nothing.
+TEST(ConstraintMathTest, LinearBendsPullOnlyTowardOtherAngles) {
+    const std::vector<double> x = {-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.2, 0.0, 0.0};
+    const auto norm_of = [](const std::vector<double>& values) {
+        double sum = 0.0;
+        for (const double value : values) {
+            sum += value * value;
+        }
+        return std::sqrt(sum);
+    };
+
+    detail::ResolvedRestraint restraint;
+    restraint.kind = RestraintKind::ANGLE;
+    restraint.atoms = {0, 1, 2};
+    restraint.force_constant = 10.0;
+    restraint.target = 120.0 * Units::DEGREES_TO_RADIANS;
+    std::vector<double> gradient(x.size(), 0.0);
+    EXPECT_GT(detail::restraint_energy({restraint}, x, &gradient), 0.0);
+    EXPECT_GT(norm_of(gradient), 1.0);
+
+    restraint.target = Units::PI;
+    gradient.assign(x.size(), 0.0);
+    EXPECT_NEAR(detail::restraint_energy({restraint}, x, &gradient), 0.0, 1e-24);
+    EXPECT_LT(norm_of(gradient), 1e-12);
+
+    detail::ResolvedConstraint constraint;
+    constraint.kind = ConstraintKind::ANGLE;
+    constraint.atoms = {0, 1, 2};
+    constraint.target = 120.0 * Units::DEGREES_TO_RADIANS;
+    std::vector<double> row;
+    EXPECT_NEAR(detail::constraint_residual(constraint, x, &row), Units::PI - constraint.target,
+                1e-12);
+    EXPECT_GT(norm_of(row), 1.0);
+
+    // Bent by rounding-sized amounts, the bend may lie opposite the fixed escape direction, which
+    // would then push a 180-degree term further off linearity instead of back.
+    for (const double offset : {1e-10, -1e-10}) {
+        SCOPED_TRACE(offset);
+        std::vector<double> nearly = x;
+        nearly[1] = offset;
+        ASSERT_TRUE(detail::is_linear_bend(detail::angle(nearly.data(), 0, 1, 2, nullptr)));
+        gradient.assign(x.size(), 0.0);
+        detail::restraint_energy({restraint}, nearly, &gradient);
+        EXPECT_EQ(norm_of(gradient), 0.0);
+        constraint.target = Units::PI;
+        detail::constraint_residual(constraint, nearly, &row);
+        EXPECT_EQ(norm_of(row), 0.0);
+    }
+}
+
 TEST(ConstraintMathTest, RestraintEnergyAndGradient) {
     std::vector<double> x = test::sample_geometry();
     std::vector<detail::ResolvedRestraint> restraints(4);

@@ -24,6 +24,15 @@ void put(double* gradient, unsigned slot, const Vec3& value) {
     gradient[3 * slot + 2] = value.z();
 }
 
+/// :returns: A unit vector perpendicular to the unit vector ``axis``, built from the coordinate
+///     axis least aligned with it so that the same bond always gives the same direction.
+Vec3 perpendicular_to(const Vec3& axis) {
+    Eigen::Index least = 0;
+    axis.cwiseAbs().minCoeff(&least);
+    const Vec3 unit = Vec3::Unit(least);
+    return (unit - unit.dot(axis) * axis).normalized();
+}
+
 }  // namespace
 
 double wrap_angle(double radians) {
@@ -55,22 +64,36 @@ double angle(const double* x, unsigned i, unsigned j, unsigned k, double* gradie
     const double nv = v.norm();
     const double theta = std::atan2(u.cross(v).norm(), u.dot(v));
     if (gradient != nullptr) {
-        const double s = std::sin(theta);
-        if (nu == 0.0 || nv == 0.0 || std::abs(s) < 1e-8) {
+        if (nu == 0.0 || nv == 0.0) {
             std::fill(gradient, gradient + 9, 0.0);
-        } else {
-            const double c = std::cos(theta);
-            const Vec3 eu = u / nu;
-            const Vec3 ev = v / nv;
-            const Vec3 gi = (c * eu - ev) / (nu * s);
-            const Vec3 gk = (c * ev - eu) / (nv * s);
-            put(gradient, 0, gi);
-            put(gradient, 1, -(gi + gk));
-            put(gradient, 2, gk);
+            return theta;
         }
+        const Vec3 eu = u / nu;
+        const Vec3 ev = v / nv;
+        Vec3 gi;
+        Vec3 gk;
+        if (is_linear_bend(theta)) {
+            // A linear bend has no derivative, and a zero gradient would leave a restraint or
+            // constraint toward any other angle with nothing to follow. Use the limit of the
+            // regular formula as the bend opens toward a fixed perpendicular direction: the
+            // one-sided derivative along it.
+            const Vec3 bend = perpendicular_to(eu);
+            gi = -bend / nu;
+            gk = (u.dot(v) < 0.0 ? -bend : bend) / nv;
+        } else {
+            const double s = std::sin(theta);
+            const double c = std::cos(theta);
+            gi = (c * eu - ev) / (nu * s);
+            gk = (c * ev - eu) / (nv * s);
+        }
+        put(gradient, 0, gi);
+        put(gradient, 1, -(gi + gk));
+        put(gradient, 2, gk);
     }
     return theta;
 }
+
+bool is_linear_bend(double theta) { return std::abs(std::sin(theta)) < 1e-8; }
 
 double dihedral(const double* x, unsigned i, unsigned j, unsigned k, unsigned l, double* gradient) {
     const Vec3 f = position(x, i) - position(x, j);
