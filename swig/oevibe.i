@@ -1,6 +1,6 @@
 // swig/oevibe.i
 // SWIG interface file for oevibe Python bindings
-%module _oevibe
+%module(threads="1") _oevibe
 
 %{
 #include "oevibe/oevibe.h"
@@ -350,18 +350,89 @@ OE_CROSS_RUNTIME_NULLABLE_PTR_TYPEMAPS(OESystem::OEScalarGrid, _oevibe_is_oescal
 OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Expected OEReceptor object.")
 
 // ============================================================================
-// Include STL typemaps
+// GIL: held by default, released only for calculation calls
+// ============================================================================
+// A feature applies only to declarations parsed after it, so this block precedes every
+// wrapper-generating directive. Plan A engines are native C++ and never call back into Python,
+// so releasing the GIL around a calculation is safe.
+%feature("nothreadallow", "1");
+%threadallow OEVIBE::Calculation::Calculation;
+%threadallow OEVIBE::Calculation::Energy;
+%threadallow OEVIBE::Calculation::Gradient;
+
+// ============================================================================
+// STL support
 // ============================================================================
 %include "std_string.i"
+%include "std_vector.i"
+%include "std_map.i"
 %include "stdint.i"
 %include "exception.i"
 
+%template(DoubleVector) std::vector<double>;
+%template(UnsignedVector) std::vector<unsigned int>;
+%template(StringVector) std::vector<std::string>;
+%template(StringStringMap) std::map<std::string, std::string>;
+%template(UnsignedDoubleMap) std::map<unsigned int, double>;
+
 // ============================================================================
-// Exception handling
+// Exceptions: each C++ class maps to a Python class rooted at RuntimeError
 // ============================================================================
+%{
+static PyObject* g_oevibe_error = NULL;
+static PyObject* g_options_error = NULL;
+static PyObject* g_engine_unavailable_error = NULL;
+static PyObject* g_input_error = NULL;
+static PyObject* g_unsupported_error = NULL;
+
+// Idempotent: if module initialization runs twice, the existing class is reused.
+static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* qualified,
+                                const char* name, PyObject* base) {
+    if (*slot == NULL) {
+        *slot = PyErr_NewException(qualified, base, NULL);
+        if (*slot == NULL) {
+            return -1;
+        }
+    }
+    return PyModule_AddObjectRef(module, name, *slot);
+}
+%}
+
+%init %{
+    /* SWIG 4.5 emits this block into SWIG_mod_exec, a Py_mod_exec slot returning int: 0 for
+       success, -1 for failure. */
+    if (oevibe_add_exception(m, &g_oevibe_error, "oevibe.OEVibeError", "OEVibeError",
+                             PyExc_RuntimeError) < 0 ||
+        oevibe_add_exception(m, &g_options_error, "oevibe.OptionsError", "OptionsError",
+                             g_oevibe_error) < 0 ||
+        oevibe_add_exception(m, &g_engine_unavailable_error, "oevibe.EngineUnavailableError",
+                             "EngineUnavailableError", g_oevibe_error) < 0 ||
+        oevibe_add_exception(m, &g_input_error, "oevibe.InputError", "InputError",
+                             g_oevibe_error) < 0 ||
+        oevibe_add_exception(m, &g_unsupported_error, "oevibe.UnsupportedError",
+                             "UnsupportedError", g_oevibe_error) < 0) {
+        return -1;
+    }
+%}
+
 %exception {
     try {
         $action
+    } catch (const OEVIBE::OptionsError& e) {
+        PyErr_SetString(g_options_error, e.what());
+        SWIG_fail;
+    } catch (const OEVIBE::EngineUnavailableError& e) {
+        PyErr_SetString(g_engine_unavailable_error, e.what());
+        SWIG_fail;
+    } catch (const OEVIBE::InputError& e) {
+        PyErr_SetString(g_input_error, e.what());
+        SWIG_fail;
+    } catch (const OEVIBE::UnsupportedError& e) {
+        PyErr_SetString(g_unsupported_error, e.what());
+        SWIG_fail;
+    } catch (const OEVIBE::OEVibeError& e) {
+        PyErr_SetString(g_oevibe_error, e.what());
+        SWIG_fail;
     } catch (const std::exception& e) {
         SWIG_exception(SWIG_RuntimeError, e.what());
     } catch (...) {
@@ -370,7 +441,36 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 }
 
 // ============================================================================
-// Version macros
+// Scope of the Python API in Plan A
+// ============================================================================
+// Engines, the registry, and MolecularSystem reach Python with the director engines of Plan C.
+// The predicate overload of FreezeAtoms is replaced by a Python method below, so no OpenEye
+// predicate crosses the runtime boundary (spec 6.6).
+%ignore OEVIBE::ConstraintSet::FreezeAtoms;
+%ignore OEVIBE::ConstraintSet::GetConstraints;
+%ignore OEVIBE::ConstraintSet::GetRestraints;
+%ignore OEVIBE::Constraint;
+%ignore OEVIBE::Restraint;
+%ignore OEVIBE::Provenance::resolved_options;
+%ignore OEVIBE::Method::operator<;
+%rename(__eq__) OEVIBE::Method::operator==;
+%rename(__ne__) OEVIBE::Method::operator!=;
+%rename(__eq__) OEVIBE::Solvent::operator==;
+%ignore OEVIBE::property_names;
+%ignore OEVIBE::ResultSet::Add;
+%ignore OEVIBE::ResultSet::Finalize;
+
+// Python must never hold a pointer into a C++ object it does not keep alive, so getters that
+// return a reference set ``_parent`` on the result.
+%pythonappend OEVIBE::ResultSet::Get %{ val._parent = self %}
+%pythonappend OEVIBE::ResultSet::GetLowest %{ val._parent = self %}
+%pythonappend OEVIBE::ConformerResult::GetOptimizationStats %{ val._parent = self %}
+%pythonappend OEVIBE::ConformerResult::GetProvenance %{ val._parent = self %}
+%pythonappend OEVIBE::ConformerResult::GetTimings %{ val._parent = self %}
+%pythonappend OEVIBE::OptimizerOptions::GetConstraints %{ val._parent = self %}
+
+// ============================================================================
+// Version
 // ============================================================================
 #define OEVIBE_VERSION_MAJOR 0
 #define OEVIBE_VERSION_MINOR 1
@@ -379,15 +479,96 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 // ============================================================================
 // Wrapped API
 // ============================================================================
-namespace OEVIBE {
+%include "oevibe/Units.h"
+%include "oevibe/Method.h"
+%include "oevibe/Preset.h"
+%include "oevibe/Solvent.h"
+%include "oevibe/Property.h"
+%template(BondOrderVector) std::vector<OEVIBE::BondOrder>;
+%include "oevibe/Constraints.h"
+%include "oevibe/Options.h"
+%include "oevibe/Result.h"
+%include "oevibe/Calculation.h"
 
-double calculate_molecular_weight(const OEChem::OEMolBase& mol);
+%extend OEVIBE::Provenance {
+    std::map<std::string, std::string> GetResolvedOptions() const {
+        return $self->resolved_options;
+    }
+}
 
-} // namespace OEVIBE
+%extend OEVIBE::ConstraintSet {
+%pythoncode %{
+    def FreezeAtoms(self, mol, predicate):
+        """Freeze every atom of ``mol`` that matches an OpenEye atom predicate.
+
+        The predicate is evaluated here in Python, so built-in and Python-defined predicates
+        both work and no predicate crosses into C++ (spec 6.6).
+        """
+        self.FreezeAtomIndices([atom.GetIdx() for atom in mol.GetAtoms(predicate)])
+%}
+}
+
+%extend OEVIBE::ResultSet {
+%pythoncode %{
+    def __len__(self):
+        return self.Size()
+
+    def __getitem__(self, index):
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        return self.Get(index)
+
+    def __iter__(self):
+        return (self[i] for i in range(len(self)))
+%}
+}
 
 // ============================================================================
-// Module-level Python convenience code
+// Module-level Python code: enums and exception aliases
 // ============================================================================
 %pythoncode %{
+import enum as _enum
+
 __version__ = "0.1.0"
+
+OEVibeError = _oevibe.OEVibeError
+OptionsError = _oevibe.OptionsError
+EngineUnavailableError = _oevibe.EngineUnavailableError
+InputError = _oevibe.InputError
+UnsupportedError = _oevibe.UnsupportedError
+
+
+class Preset(_enum.IntEnum):
+    FAST = Preset_FAST
+    STANDARD = Preset_STANDARD
+    THOROUGH = Preset_THOROUGH
+
+
+class SolventModel(_enum.IntEnum):
+    AUTO = SolventModel_AUTO
+    ALPB = SolventModel_ALPB
+    GBSA = SolventModel_GBSA
+    SHEFFIELD = SolventModel_SHEFFIELD
+
+
+class Property(_enum.IntEnum):
+    CHARGES = Property_CHARGES
+    DIPOLE = Property_DIPOLE
+    ORBITAL_ENERGIES = Property_ORBITAL_ENERGIES
+    BOND_ORDERS = Property_BOND_ORDERS
+
+
+class Algorithm(_enum.IntEnum):
+    AUTO = Algorithm_AUTO
+    ANC_RFO = Algorithm_ANC_RFO
+    LBFGS = Algorithm_LBFGS
+
+
+class ConformerStatus(_enum.IntEnum):
+    OK = ConformerStatus_OK
+    NOT_CONVERGED = ConformerStatus_NOT_CONVERGED
+    ENGINE_ERROR = ConformerStatus_ENGINE_ERROR
+    UNSUPPORTED = ConformerStatus_UNSUPPORTED
 %}

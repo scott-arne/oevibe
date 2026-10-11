@@ -4,6 +4,15 @@ include(OpenEyeSWIG)
 # append each header they wrap.
 set(_OEVIBE_SWIG_DEPENDS
     ${CMAKE_SOURCE_DIR}/include/oevibe/oevibe.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Units.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Method.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Preset.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Solvent.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Property.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Constraints.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Options.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Result.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Calculation.h
 )
 set_source_files_properties(oevibe.i PROPERTIES DEPENDS "${_OEVIBE_SWIG_DEPENDS}")
 

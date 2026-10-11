@@ -17,18 +17,22 @@ if _build_info.OPENEYE_LIBRARY_TYPE != "SHARED":
 
 
 @pytest.fixture
-def aspirin_mol():
-    """Create an aspirin molecule (C9H8O4) for testing."""
-    from openeye import oechem
+def butanol_conformers():
+    """1-Butanol with up to three OMEGA conformers and explicit hydrogens."""
+    from openeye import oechem, oeomega
 
-    mol = oechem.OEGraphMol()
-    oechem.OESmilesToMol(mol, "CC(=O)OC1=CC=CC=C1C(=O)O")
+    mol = oechem.OEMol()
+    assert oechem.OESmilesToMol(mol, "CCCCO")
+    options = oeomega.OEOmegaOptions()
+    options.SetMaxConfs(3)
+    omega = oeomega.OEOmega(options)
+    assert omega.Build(mol) == oeomega.OEOmegaReturnCode_Success
     return mol
 
 
 @pytest.fixture
-def ethanol_mol():
-    """Create an ethanol molecule (C2H6O) for testing."""
+def flat_ethanol():
+    """Ethanol without coordinates, which every calculation must reject."""
     from openeye import oechem
 
     mol = oechem.OEGraphMol()

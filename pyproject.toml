@@ -111,3 +111,11 @@ exclude = ["python/oevibe/oevibe\\.py$", "python/oevibe/_build_info\\.py$", "^bu
 [[tool.mypy.overrides]]
 module = ["oevibe.oevibe", "oevibe._build_info"]
 ignore_errors = true
+
+# oevibe/__init__.py imports _verbs, and _verbs imports the generated proxy, which in turn does
+# ``from . import _oevibe``. That cycle leaves mypy unable to infer the proxy's module-level
+# enum aliases at their use sites in _verbs. They are Any either way, so only this one error
+# code is silenced, and only for this module.
+[[tool.mypy.overrides]]
+module = ["oevibe._verbs"]
+disable_error_code = ["has-type"]

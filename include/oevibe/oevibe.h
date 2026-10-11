@@ -6,19 +6,20 @@
 #define OEVIBE_VERSION_MINOR 1
 #define OEVIBE_VERSION_PATCH 0
 
-#include <oechem.h>
+#include "oevibe/Calculation.h"
+#include "oevibe/Constraints.h"
+#include "oevibe/Engine.h"
+#include "oevibe/EngineRegistry.h"
+#include "oevibe/Error.h"
+#include "oevibe/Method.h"
+#include "oevibe/MolecularSystem.h"
+#include "oevibe/OEAdapters.h"
+#include "oevibe/Options.h"
+#include "oevibe/Preset.h"
+#include "oevibe/Property.h"
+#include "oevibe/Result.h"
+#include "oevibe/Solvent.h"
+#include "oevibe/Units.h"
+#include "oevibe/engines/OEFFEngine.h"
 
-namespace OEVIBE {
-
-/// \brief Calculate the molecular weight of a molecule.
-///
-/// Passes the molecule natively from Python to C++ via SWIG typemaps,
-/// then delegates to OEChem's OECalculateMolecularWeight.
-///
-/// \param mol Reference to an OEMolBase object.
-/// \returns Molecular weight in Daltons.
-double calculate_molecular_weight(const OEChem::OEMolBase& mol);
-
-} // namespace OEVIBE
-
-#endif // OEVIBE_H
+#endif  // OEVIBE_H
