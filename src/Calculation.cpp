@@ -343,10 +343,15 @@ ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
 
 ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& options) {
     const Clock::time_point call_start = Clock::now();
-    options.Validate();
+    // The optimizer checks run before Prepare, which may add hydrogens to the caller's molecule.
+    // Resolving validates the options; its atom count only sets the default iteration limit, so
+    // the settings are resolved again for the prepared system below. Adding hydrogens appends
+    // atoms without renumbering, so every atom referenced here stays valid.
+    resolve_optimizer_settings(options, settings_.preset, mol.NumAtoms(),
+                               capabilities_.force_field);
+    detail::check_constraint_atoms(options.GetConstraints(), mol);
     CallState state = Prepare(mol);
     const MolecularSystem& system = *state.system;
-    detail::check_constraint_atoms(options.GetConstraints(), system);
     const ResolvedOptimizerSettings resolved_settings = resolve_optimizer_settings(
         options, settings_.preset, system.NumAtoms(), capabilities_.force_field);
     const double setup_seconds = seconds_since(call_start);
@@ -401,6 +406,16 @@ ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& 
                     outcome.converged ? ConformerStatus::OK : ConformerStatus::NOT_CONVERGED,
                     outcome.converged ? "" : outcome.message);
             }
+        } catch (const detail::OptimizationFailure& e) {
+            // Spec 7.5: an engine failure keeps the values computed before it. Write-back skips
+            // ENGINE_ERROR conformers, so the molecule keeps its input coordinates.
+            if (e.HasPartialOutcome()) {
+                const detail::OptimizationOutcome& partial = e.GetPartialOutcome();
+                result.SetEnergy(partial.engine_energy);
+                result.SetCoordinates(system.ToOELayout(partial.x));
+                result.SetOptimizationStats(partial.stats);
+            }
+            result.SetStatus(ConformerStatus::ENGINE_ERROR, e.what());
         } catch (const UnsupportedError& e) {
             result.SetStatus(ConformerStatus::UNSUPPORTED, e.what());
         } catch (const std::exception& e) {

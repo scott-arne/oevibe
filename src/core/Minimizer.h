@@ -12,14 +12,6 @@ namespace detail {
 using ObjectiveFn =
     std::function<double(const std::vector<double>& x, std::vector<double>& gradient)>;
 
-struct MinimizerSettings {
-    unsigned max_iterations = 200;
-    double energy_change = 0.0;         ///< kcal/mol
-    double gradient_norm = 0.0;         ///< kcal/mol/Angstrom, projected gradient
-    double initial_trust_radius = 0.1;  ///< Angstrom
-    double max_trust_radius = 0.3;      ///< Angstrom
-};
-
 struct MinimizerResult {
     std::vector<double> x;
     double energy = 0.0;
@@ -33,6 +25,21 @@ struct MinimizerResult {
     double max_distance_residual = 0.0;  ///< Angstrom
     double max_angle_residual = 0.0;     ///< degrees
     std::string message;
+};
+
+/// Receives the current iterate once for the starting point and once after every accepted
+/// step, before the minimizer evaluates any other point, so the iterate is always the most
+/// recently evaluated point. Everything but ``gradient``, ``converged``, and ``message`` is
+/// filled in as the minimizer would report it if it stopped there.
+using IterateObserver = std::function<void(const MinimizerResult& iterate)>;
+
+struct MinimizerSettings {
+    unsigned max_iterations = 200;
+    double energy_change = 0.0;         ///< kcal/mol
+    double gradient_norm = 0.0;         ///< kcal/mol/Angstrom, projected gradient
+    double initial_trust_radius = 0.1;  ///< Angstrom
+    double max_trust_radius = 0.3;      ///< Angstrom
+    IterateObserver observer;           ///< Optional.
 };
 
 /// Zeroes the x, y, z components of every frozen atom.

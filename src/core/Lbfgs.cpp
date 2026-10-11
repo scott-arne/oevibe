@@ -36,11 +36,24 @@ MinimizerResult lbfgs_minimize(const ObjectiveFn& objective, std::vector<double>
     std::deque<VectorXd> s_history;
     std::deque<VectorXd> y_history;
     bool stepped = false;
+    bool fresh = true;  // x has not been reported to the observer yet
     double last_change = 0.0;
     unsigned iteration = 0;
     while (true) {
         const VectorXd g = as_vector(gradient);
         const double g_norm = g.norm();
+        if (fresh && settings.observer) {
+            MinimizerResult iterate;
+            iterate.x = x;
+            iterate.energy = energy;
+            iterate.iterations = iteration;
+            iterate.evaluations = result.evaluations;
+            iterate.energy_change = last_change;
+            iterate.gradient_norm = g_norm;
+            iterate.max_gradient_component = dim > 0 ? g.cwiseAbs().maxCoeff() : 0.0;
+            settings.observer(iterate);
+        }
+        fresh = false;
         const bool energy_ok = !stepped || std::abs(last_change) < settings.energy_change;
         if (g_norm < settings.gradient_norm && energy_ok) {
             result.converged = true;
@@ -123,6 +136,7 @@ MinimizerResult lbfgs_minimize(const ObjectiveFn& objective, std::vector<double>
         }
         last_change = trial_energy - energy;
         stepped = true;
+        fresh = true;
         x = std::move(trial);
         gradient = std::move(trial_gradient);
         energy = trial_energy;

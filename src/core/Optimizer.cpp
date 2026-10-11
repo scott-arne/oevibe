@@ -1,12 +1,46 @@
 #include "core/Optimizer.h"
 
 #include <stdexcept>
+#include <utility>
 
 #include "core/AncRfo.h"
 #include "core/Lbfgs.h"
+#include "oevibe/Error.h"
 
 namespace OEVIBE {
 namespace detail {
+
+namespace {
+
+OptimizationStats stats_of(const MinimizerResult& result, unsigned evaluations,
+                           double restraint_energy) {
+    OptimizationStats stats;
+    stats.iterations = result.iterations;
+    stats.gradient_evaluations = evaluations;
+    stats.converged = result.converged;
+    stats.energy_change = result.energy_change;
+    stats.gradient_norm = result.gradient_norm;
+    stats.max_gradient_component = result.max_gradient_component;
+    stats.max_distance_residual = result.max_distance_residual;
+    stats.max_angle_residual = result.max_angle_residual;
+    stats.restraint_energy = restraint_energy;
+    return stats;
+}
+
+}  // namespace
+
+OptimizationFailure::OptimizationFailure(const std::string& message,
+                                         std::shared_ptr<const OptimizationOutcome> partial)
+    : std::runtime_error(message), partial_(std::move(partial)) {}
+
+bool OptimizationFailure::HasPartialOutcome() const { return partial_ != nullptr; }
+
+const OptimizationOutcome& OptimizationFailure::GetPartialOutcome() const {
+    if (!partial_) {
+        throw std::logic_error("the optimization failed before any evaluation succeeded");
+    }
+    return *partial_;
+}
 
 OptimizationOutcome run_optimization(EngineSession& session, const OptimizationProblem& problem) {
     const auto num_atoms = static_cast<unsigned>(problem.atomic_numbers.size());
@@ -49,36 +83,59 @@ OptimizationOutcome run_optimization(EngineSession& session, const OptimizationP
     settings.initial_trust_radius = problem.settings.initial_trust_radius;
     settings.max_trust_radius = problem.settings.max_trust_radius;
 
-    MinimizerResult result;
-    if (problem.settings.algorithm == Algorithm::LBFGS) {
-        result = lbfgs_minimize(objective, problem.x0, problem.constraints.frozen, settings);
-    } else {
-        AncRfoProblem anc;
-        anc.atomic_numbers = problem.atomic_numbers;
-        anc.frozen = problem.constraints.frozen;
-        anc.constraints = problem.constraints.constraints;
-        result = anc_rfo_minimize(objective, problem.x0, anc, settings);
-    }
+    // The last iterate the minimizer accepted, with its energies, so that a failure later in
+    // the run still reports the furthest geometry reached. The last evaluated point would not
+    // do: it may be a trial the minimizer rejected.
+    bool have_iterate = false;
+    MinimizerResult last_iterate;
+    double last_iterate_engine = 0.0;
+    double last_iterate_restraint = 0.0;
+    settings.observer = [&](const MinimizerResult& iterate) {
+        // The minimizers report a point they have just evaluated, so this is a cache hit that
+        // leaves the cached energies those of ``iterate.x``.
+        std::vector<double> unused;
+        objective(iterate.x, unused);
+        last_iterate = iterate;
+        last_iterate_engine = cached_engine;
+        last_iterate_restraint = cached_restraint;
+        have_iterate = true;
+    };
 
-    // The cache may hold a rejected trial point; re-evaluating the final geometry is a cache
-    // hit when it does not, and otherwise costs one evaluation.
-    std::vector<double> final_gradient;
-    objective(result.x, final_gradient);
+    MinimizerResult result;
+    try {
+        if (problem.settings.algorithm == Algorithm::LBFGS) {
+            result = lbfgs_minimize(objective, problem.x0, problem.constraints.frozen, settings);
+        } else {
+            AncRfoProblem anc;
+            anc.atomic_numbers = problem.atomic_numbers;
+            anc.frozen = problem.constraints.frozen;
+            anc.constraints = problem.constraints.constraints;
+            result = anc_rfo_minimize(objective, problem.x0, anc, settings);
+        }
+        // The cache may hold a rejected trial point; re-evaluating the final geometry is a
+        // cache hit when it does not, and otherwise costs one evaluation.
+        std::vector<double> final_gradient;
+        objective(result.x, final_gradient);
+    } catch (const UnsupportedError&) {
+        throw;
+    } catch (const std::exception& e) {
+        std::shared_ptr<OptimizationOutcome> partial;
+        if (have_iterate) {
+            partial = std::make_shared<OptimizationOutcome>();
+            partial->message = e.what();
+            partial->x = last_iterate.x;
+            partial->engine_energy = last_iterate_engine;
+            partial->stats = stats_of(last_iterate, evaluations, last_iterate_restraint);
+        }
+        throw OptimizationFailure(e.what(), std::move(partial));
+    }
 
     OptimizationOutcome outcome;
     outcome.converged = result.converged;
     outcome.message = result.message;
     outcome.x = result.x;
     outcome.engine_energy = cached_engine;
-    outcome.stats.iterations = result.iterations;
-    outcome.stats.gradient_evaluations = evaluations;
-    outcome.stats.converged = result.converged;
-    outcome.stats.energy_change = result.energy_change;
-    outcome.stats.gradient_norm = result.gradient_norm;
-    outcome.stats.max_gradient_component = result.max_gradient_component;
-    outcome.stats.max_distance_residual = result.max_distance_residual;
-    outcome.stats.max_angle_residual = result.max_angle_residual;
-    outcome.stats.restraint_energy = cached_restraint;
+    outcome.stats = stats_of(result, evaluations, cached_restraint);
     return outcome;
 }
 

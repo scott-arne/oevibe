@@ -151,6 +151,7 @@ MinimizerResult anc_rfo_minimize(const ObjectiveFn& objective, std::vector<doubl
     unsigned rejections = 0;
     unsigned iteration = 0;
     bool stepped = false;
+    bool fresh = true;  // x has not been reported to the observer yet
     double last_change = 0.0;
     while (true) {
         const VectorXd g_anc = basis.vectors.transpose() * as_vector(gradient);
@@ -164,6 +165,15 @@ MinimizerResult anc_rfo_minimize(const ObjectiveFn& objective, std::vector<doubl
             basis.vectors.cols() > 0 ? (basis.vectors * projected).cwiseAbs().maxCoeff() : 0.0;
         result.max_distance_residual = residuals.max_distance;
         result.max_angle_residual = residuals.max_angle;
+        if (fresh && settings.observer) {
+            MinimizerResult iterate = result;  // carries the gradient norms and residuals above
+            iterate.x = x;
+            iterate.energy = energy;
+            iterate.iterations = iteration;
+            iterate.energy_change = last_change;
+            settings.observer(iterate);
+        }
+        fresh = false;
         const bool energy_ok = !stepped || std::abs(last_change) < settings.energy_change;
         if (result.gradient_norm < settings.gradient_norm && energy_ok && residuals_ok) {
             result.converged = true;
@@ -232,6 +242,7 @@ MinimizerResult anc_rfo_minimize(const ObjectiveFn& objective, std::vector<doubl
         energy = trial_energy;
         last_change = change;
         stepped = true;
+        fresh = true;
         if (++since_rebuild >= REBUILD_INTERVAL) {
             rebuild();
         }

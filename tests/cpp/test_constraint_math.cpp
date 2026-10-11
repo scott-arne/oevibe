@@ -38,6 +38,20 @@ TEST(ConstraintMathTest, MissingAtomsAreInputErrors) {
     EXPECT_THROW(detail::check_constraint_atoms(set, system), InputError);
 }
 
+TEST(ConstraintMathTest, MissingAtomsOfAMoleculeAreInputErrors) {
+    const OEChem::OEMol mol = test::make_gapped_methane();
+    ConstraintSet deleted;
+    deleted.AddDistance(1, 2);  // atom 1 was deleted
+    EXPECT_THROW(detail::check_constraint_atoms(deleted, mol), InputError);
+    ConstraintSet beyond;
+    beyond.FreezeAtomIndices({6});
+    EXPECT_THROW(detail::check_constraint_atoms(beyond, mol), InputError);
+    ConstraintSet present;
+    present.AddDistance(0, 5);
+    present.FreezeAtomIndices({2});
+    EXPECT_NO_THROW(detail::check_constraint_atoms(present, mol));
+}
+
 TEST(ConstraintMathTest, ResidualJacobianMatchesFiniteDifferences) {
     std::vector<double> x = test::sample_geometry();
     detail::ResolvedConstraint dihedral;

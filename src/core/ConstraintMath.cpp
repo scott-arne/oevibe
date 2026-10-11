@@ -69,6 +69,18 @@ void check_constraint_atoms(const ConstraintSet& constraints, const MolecularSys
     }
 }
 
+void check_constraint_atoms(const ConstraintSet& constraints, const OEChem::OEMolBase& mol) {
+    std::vector<bool> present(mol.GetMaxAtomIdx(), false);
+    for (OESystem::OEIter<OEChem::OEAtomBase> atom = mol.GetAtoms(); atom; ++atom) {
+        present[atom->GetIdx()] = true;
+    }
+    for (unsigned atom : constraints.GetReferencedAtoms()) {
+        if (atom >= present.size() || !present[atom]) {
+            throw InputError("atom index " + std::to_string(atom) + " is not in the molecule");
+        }
+    }
+}
+
 ResolvedConstraintSet resolve_constraint_set(const ConstraintSet& constraints,
                                              const MolecularSystem& system,
                                              const std::vector<double>& x0) {

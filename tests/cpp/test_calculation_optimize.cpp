@@ -179,6 +179,93 @@ TEST(CalculationOptimizeTest, OptionAndInputErrorsComeFirst) {
     EXPECT_THROW(Calculation(mmff94()).Optimize(mol, missing), InputError);
 }
 
+TEST(CalculationOptimizeTest, RejectedCallsLeaveTheMoleculeUnchanged) {
+    // Input preparation would add the six hydrogens to the caller's molecule.
+    const auto implicit_ethanol = []() {
+        OEChem::OEMol mol = test::make_conformers("CCO");
+        OEChem::OESuppressHydrogens(mol);
+        return mol;
+    };
+
+    OEChem::OEMol missing_atom = implicit_ethanol();
+    OptimizerOptions far_reference;
+    ConstraintSet far;
+    far.AddDistance(0, 999);
+    far_reference.SetConstraints(far);
+    EXPECT_THROW(Calculation(mmff94()).Optimize(missing_atom, far_reference), InputError);
+    EXPECT_EQ(missing_atom.NumAtoms(), 3u);
+    EXPECT_TRUE(OEChem::OEHasImplicitHydrogens(missing_atom));
+
+    // Validate() accepts a lone initial trust radius; only resolution against the preset's
+    // maximum rejects it.
+    OEChem::OEMol wide_trust = implicit_ethanol();
+    OptimizerOptions wide_start;
+    wide_start.SetInitialTrustRadius(2.0 * preset_values(Preset::STANDARD).max_trust_radius);
+    EXPECT_THROW(Calculation(mmff94()).Optimize(wide_trust, wide_start), OptionsError);
+    EXPECT_EQ(wide_trust.NumAtoms(), 3u);
+    EXPECT_TRUE(OEChem::OEHasImplicitHydrogens(wide_trust));
+}
+
+TEST(CalculationOptimizeTest, LateEngineFailuresKeepTheLastAcceptedGeometry) {
+    for (const test::FakeMode mode :
+         {test::FakeMode::THROW_RUNTIME, test::FakeMode::MALFORMED_GRADIENT}) {
+        SCOPED_TRACE(mode == test::FakeMode::THROW_RUNTIME ? "exception" : "malformed");
+        OEChem::OEMol mol = test::make_conformers("CCCCO");
+        const std::shared_ptr<test::FakeEngine> engine =
+            test::register_fake("optimize-late-failure");
+        // OMEGA leaves no index gaps, so the OpenEye coordinates are also the dense ones.
+        const std::vector<double> reference = coordinates_of(*mol.GetActive());
+        engine->reference = reference;
+        engine->mode = mode;
+        engine->healthy_evaluations = 5;
+        jitter(mol);
+        const std::vector<double> start = coordinates_of(*mol.GetActive());
+        CalculationOptions options;
+        options.SetMethod(Method("fake-method"));
+        options.SetEngine("optimize-late-failure");
+
+        const ResultSet results = Calculation(options).Optimize(mol, OptimizerOptions());
+        const ConformerResult& result = results.Get(0);
+        ASSERT_EQ(result.GetStatus(), ConformerStatus::ENGINE_ERROR);
+        EXPECT_NE(result.GetMessage().find(mode == test::FakeMode::THROW_RUNTIME
+                                               ? "fake engine failure"
+                                               : "malformed Evaluation"),
+                  std::string::npos)
+            << result.GetMessage();
+        ASSERT_TRUE(result.HasEnergy());
+        ASSERT_TRUE(result.HasCoordinates());
+        ASSERT_TRUE(result.HasOptimizationStats());
+        EXPECT_FALSE(result.GetOptimizationStats().converged);
+        EXPECT_GE(result.GetOptimizationStats().iterations, 1u);
+        EXPECT_GE(result.GetOptimizationStats().gradient_evaluations, 5u);
+        // The energy is the engine's at the reported geometry, which improves on the start.
+        EXPECT_NEAR(result.GetEnergy(),
+                    test::spring_energy(reference, result.GetCoordinates(), engine->force_constant,
+                                        nullptr),
+                    1e-9);
+        EXPECT_LT(result.GetEnergy(),
+                  test::spring_energy(reference, start, engine->force_constant, nullptr));
+        // ENGINE_ERROR conformers are not written back (spec 6.5).
+        EXPECT_EQ(coordinates_of(*mol.GetActive()), start);
+    }
+}
+
+TEST(CalculationOptimizeTest, ImmediateEngineFailuresKeepNoValues) {
+    const std::shared_ptr<test::FakeEngine> engine =
+        test::register_fake("optimize-immediate-failure");
+    engine->mode = test::FakeMode::THROW_RUNTIME;
+    CalculationOptions options;
+    options.SetMethod(Method("fake-method"));
+    options.SetEngine("optimize-immediate-failure");
+    OEChem::OEMol mol = test::make_conformers("CCO");
+    const ResultSet results = Calculation(options).Optimize(mol, OptimizerOptions());
+    const ConformerResult& result = results.Get(0);
+    EXPECT_EQ(result.GetStatus(), ConformerStatus::ENGINE_ERROR);
+    EXPECT_FALSE(result.HasEnergy());
+    EXPECT_FALSE(result.HasCoordinates());
+    EXPECT_FALSE(result.HasOptimizationStats());
+}
+
 TEST(CalculationOptimizeTest, IterationLimitGivesNotConverged) {
     OEChem::OEMol mol = test::make_conformers("CCCCO");
     jitter(mol);

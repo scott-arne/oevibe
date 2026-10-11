@@ -115,21 +115,23 @@ enum class FakeMode { HARMONIC, THROW_UNSUPPORTED, THROW_RUNTIME, MALFORMED_GRAD
 class FakeSession : public EngineSession {
 public:
     FakeSession(std::vector<double> reference, FakeMode mode, double force_constant,
-                std::vector<std::pair<unsigned, unsigned>> bonds)
+                std::vector<std::pair<unsigned, unsigned>> bonds, unsigned healthy_evaluations)
         : reference_(std::move(reference)),
           mode_(mode),
           force_constant_(force_constant),
-          bonds_(std::move(bonds)) {}
+          bonds_(std::move(bonds)),
+          healthy_evaluations_(healthy_evaluations) {}
 
     Evaluation Evaluate(const std::vector<double>& coords,
                         const EvaluationRequest& request) override {
-        if (mode_ == FakeMode::THROW_RUNTIME) {
+        const bool healthy = evaluations_++ < healthy_evaluations_;
+        if (mode_ == FakeMode::THROW_RUNTIME && !healthy) {
             throw std::runtime_error("fake engine failure");
         }
         Evaluation evaluation;
         evaluation.energy = spring_energy(reference_, coords, force_constant_,
                                           request.gradient ? &evaluation.gradient : nullptr);
-        if (mode_ == FakeMode::MALFORMED_GRADIENT && request.gradient) {
+        if (mode_ == FakeMode::MALFORMED_GRADIENT && !healthy && request.gradient) {
             evaluation.gradient.pop_back();
         }
         const std::size_t n = coords.size() / 3;
@@ -159,6 +161,8 @@ private:
     FakeMode mode_;
     double force_constant_;
     std::vector<std::pair<unsigned, unsigned>> bonds_;
+    unsigned healthy_evaluations_;
+    unsigned evaluations_ = 0;
 };
 
 inline MethodCapabilities fake_capabilities(const std::string& method) {
@@ -200,7 +204,7 @@ public:
         }
         return std::make_shared<FakeSession>(
             reference.empty() ? system.GetConformerCoordinates(0) : reference, mode, force_constant,
-            bonds);
+            bonds, healthy_evaluations);
     }
 
     bool available = true;
@@ -208,6 +212,8 @@ public:
     std::vector<MethodCapabilities> methods;
     std::vector<KeywordSpec> keyword_specs;
     FakeMode mode = FakeMode::HARMONIC;
+    /// Evaluations per session that succeed before THROW_RUNTIME or MALFORMED_GRADIENT applies.
+    unsigned healthy_evaluations = 0;
     double force_constant = 50.0;
     std::vector<double> reference;
     int sessions_created = 0;

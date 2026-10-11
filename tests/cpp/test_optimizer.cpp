@@ -88,6 +88,56 @@ TEST(OptimizerTest, RestraintEnergyIsReportedAndExcluded) {
     EXPECT_GT(outcome.engine_energy, 1e-3);
 }
 
+TEST(OptimizerTest, FailuresCarryTheLastAcceptedIterate) {
+    const OEChem::OEMol mol = test::make_conformers("CCCCO");
+    const MolecularSystem system(mol, 0, 1);
+    const std::vector<double> reference = system.GetConformerCoordinates(0);
+    const std::vector<double> start = test::perturbed(reference, 0.08);
+    for (Algorithm algorithm : {Algorithm::LBFGS, Algorithm::ANC_RFO}) {
+        SCOPED_TRACE(algorithm_name(algorithm));
+        test::FakeEngine engine("optimizer-late-failure");
+        engine.mode = test::FakeMode::THROW_RUNTIME;
+        engine.healthy_evaluations = 5;
+        auto session = engine.CreateSession(system, EngineSettings());
+        detail::OptimizationProblem problem;
+        problem.x0 = start;
+        problem.atomic_numbers = system.GetAtomicNumbers();
+        problem.settings = settings_for(algorithm);
+        try {
+            detail::run_optimization(*session, problem);
+            FAIL() << "expected detail::OptimizationFailure";
+        } catch (const detail::OptimizationFailure& e) {
+            EXPECT_STREQ(e.what(), "fake engine failure");
+            ASSERT_TRUE(e.HasPartialOutcome());
+            const detail::OptimizationOutcome& partial = e.GetPartialOutcome();
+            EXPECT_FALSE(partial.converged);
+            EXPECT_FALSE(partial.stats.converged);
+            EXPECT_EQ(partial.stats.gradient_evaluations, 5u);
+            EXPECT_GE(partial.stats.iterations, 1u);
+            EXPECT_NEAR(partial.engine_energy,
+                        test::spring_energy(reference, partial.x, engine.force_constant, nullptr),
+                        1e-9);
+            EXPECT_LT(partial.engine_energy,
+                      test::spring_energy(reference, start, engine.force_constant, nullptr));
+        }
+    }
+
+    // A failure before any evaluation succeeds has nothing to report.
+    test::FakeEngine broken("optimizer-immediate-failure");
+    broken.mode = test::FakeMode::THROW_RUNTIME;
+    auto session = broken.CreateSession(system, EngineSettings());
+    detail::OptimizationProblem problem;
+    problem.x0 = start;
+    problem.atomic_numbers = system.GetAtomicNumbers();
+    problem.settings = settings_for(Algorithm::ANC_RFO);
+    try {
+        detail::run_optimization(*session, problem);
+        FAIL() << "expected detail::OptimizationFailure";
+    } catch (const detail::OptimizationFailure& e) {
+        EXPECT_FALSE(e.HasPartialOutcome());
+    }
+}
+
 TEST(OptimizerTest, MalformedEvaluationsThrow) {
     const OEChem::OEMol mol = test::make_conformers("CCO");
     const MolecularSystem system(mol, 0, 1);

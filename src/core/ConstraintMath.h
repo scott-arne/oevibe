@@ -43,6 +43,8 @@ struct ResidualSummary {
 
 /// :raises InputError: When a referenced OpenEye atom index is not in the system.
 void check_constraint_atoms(const ConstraintSet& constraints, const MolecularSystem& system);
+/// :raises InputError: When a referenced OpenEye atom index is not an atom of ``mol``.
+void check_constraint_atoms(const ConstraintSet& constraints, const OEChem::OEMolBase& mol);
 
 /// Maps OpenEye atom indices to dense ones and fills absent targets from ``x0``.
 ResolvedConstraintSet resolve_constraint_set(const ConstraintSet& constraints,
