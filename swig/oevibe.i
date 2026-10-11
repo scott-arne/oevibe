@@ -350,13 +350,14 @@ OE_CROSS_RUNTIME_NULLABLE_PTR_TYPEMAPS(OESystem::OEScalarGrid, _oevibe_is_oescal
 OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Expected OEReceptor object.")
 
 // ============================================================================
-// GIL: held by default, released only for calculation calls
+// GIL: held by default, released only for Energy and Gradient
 // ============================================================================
 // A feature applies only to declarations parsed after it, so this block precedes every
 // wrapper-generating directive. Plan A engines are native C++ and never call back into Python,
-// so releasing the GIL around a calculation is safe.
+// so releasing the GIL around a calculation is safe. The constructor keeps the GIL: it copies
+// the caller's CalculationOptions, which another Python thread could be editing, and it only
+// validates, so there is no calculation to overlap with.
 %feature("nothreadallow", "1");
-%threadallow OEVIBE::Calculation::Calculation;
 %threadallow OEVIBE::Calculation::Energy;
 %threadallow OEVIBE::Calculation::Gradient;
 
@@ -499,14 +500,13 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %pythonappend OEVIBE::CalculationOptions::GetMethod %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetSolvent %{ val._parent = self %}
 
-// The calculation entry points release the GIL (above), so the molecule they read must not be
-// shared with another thread that is using it.
+// Energy and Gradient release the GIL (above), so the molecule they read must not be shared with
+// another thread that is using it.
 %feature("docstring") OEVIBE::Calculation
 "Runs tasks over every conformer of a molecule with one resolved engine (spec 5.6).
 
-Not thread-safe; use one per thread. The constructor, Energy, and Gradient release the GIL while
-they run, so the same molecule must not be passed to calculations from more than one thread at
-a time."
+Not thread-safe; use one per thread. Energy and Gradient release the GIL while they run, so the
+same molecule must not be passed to calculations from more than one thread at a time."
 
 // ============================================================================
 // Version
