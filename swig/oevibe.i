@@ -460,6 +460,34 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %ignore OEVIBE::ResultSet::Add;
 %ignore OEVIBE::ResultSet::Finalize;
 
+// SWIG drops ``const`` from reference returns, so every setter of a result would be callable on
+// the views Python receives. A changed energy or provenance would silently contradict the
+// finalized relative energies and the SD tags already written, so results are read-only here:
+// C++ produces them and Python reads them.
+%ignore OEVIBE::ResultSet::AddWarningToAll;
+%ignore OEVIBE::ConformerResult::SetConformerIndex;
+%ignore OEVIBE::ConformerResult::SetStatus;
+%ignore OEVIBE::ConformerResult::AddWarning;
+%ignore OEVIBE::ConformerResult::SetAtomIndices;
+%ignore OEVIBE::ConformerResult::SetEnergy;
+%ignore OEVIBE::ConformerResult::SetRelativeEnergy;
+%ignore OEVIBE::ConformerResult::ClearRelativeEnergy;
+%ignore OEVIBE::ConformerResult::SetCoordinates;
+%ignore OEVIBE::ConformerResult::SetGradient;
+%ignore OEVIBE::ConformerResult::SetCharges;
+%ignore OEVIBE::ConformerResult::SetDipole;
+%ignore OEVIBE::ConformerResult::SetOrbitalEnergies;
+%ignore OEVIBE::ConformerResult::SetBondOrders;
+%ignore OEVIBE::ConformerResult::SetOptimizationStats;
+%ignore OEVIBE::ConformerResult::SetProvenance;
+%ignore OEVIBE::ConformerResult::SetTimings;
+
+// A Calculation resolves its engine and settings from the options at construction, so Python
+// receives a copy of them (see the %extend below); an alias that could be edited would
+// desynchronize the calculation from the tags it writes. The %ignore is lifted again before
+// the %extend because it would otherwise hide the replacement too.
+%ignore OEVIBE::Calculation::GetOptions;
+
 // Python must never hold a pointer into a C++ object it does not keep alive, so getters that
 // return a reference set ``_parent`` on the result.
 %pythonappend OEVIBE::ResultSet::Get %{ val._parent = self %}
@@ -468,9 +496,17 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %pythonappend OEVIBE::ConformerResult::GetProvenance %{ val._parent = self %}
 %pythonappend OEVIBE::ConformerResult::GetTimings %{ val._parent = self %}
 %pythonappend OEVIBE::OptimizerOptions::GetConstraints %{ val._parent = self %}
-%pythonappend OEVIBE::Calculation::GetOptions %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetMethod %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetSolvent %{ val._parent = self %}
+
+// The calculation entry points release the GIL (above), so the molecule they read must not be
+// shared with another thread that is using it.
+%feature("docstring") OEVIBE::Calculation
+"Runs tasks over every conformer of a molecule with one resolved engine (spec 5.6).
+
+Not thread-safe; use one per thread. The constructor, Energy, and Gradient release the GIL while
+they run, so the same molecule must not be passed to calculations from more than one thread at
+a time."
 
 // ============================================================================
 // Version
@@ -490,8 +526,21 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %template(BondOrderVector) std::vector<OEVIBE::BondOrder>;
 %include "oevibe/Constraints.h"
 %include "oevibe/Options.h"
+// The member variables of the result structs are filled in C++, and Python receives them as
+// views into a result, so they are exposed without setters.
+%immutable;
 %include "oevibe/Result.h"
+%mutable;
 %include "oevibe/Calculation.h"
+
+// A declaration takes its features when it is parsed, so this lifts the %ignore only for the
+// %extend below, not for the header's const-reference method parsed above.
+%rename("%s") OEVIBE::Calculation::GetOptions;
+%extend OEVIBE::Calculation {
+    OEVIBE::CalculationOptions GetOptions() const {
+        return $self->GetOptions();
+    }
+}
 
 %extend OEVIBE::Provenance {
     std::map<std::string, std::string> GetResolvedOptions() const {

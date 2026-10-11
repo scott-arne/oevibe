@@ -103,6 +103,9 @@ def energy(
 ) -> Any:
     """Single-point energies for every conformer of ``mol``.
 
+    The calculation releases the GIL while it runs, so do not pass the same molecule to
+    calculations on more than one thread at a time.
+
     :param mol: An OpenEye molecule with 3D coordinates; SD tags are written to it.
     :param method: Method name or :class:`Method`, for example ``"mmff94"``.
     :param solvent: ``None`` for gas phase, a solvent name, or a :class:`Solvent`.
@@ -138,6 +141,8 @@ def gradient(
     """Energies and gradients for every conformer of ``mol``.
 
     Parameters match :func:`energy`. Gradients use the OpenEye atom layout in kcal/mol/Angstrom.
+    The calculation releases the GIL while it runs, so do not pass the same molecule to
+    calculations on more than one thread at a time.
 
     :returns: A :class:`ResultSet` with one result per conformer.
     """
