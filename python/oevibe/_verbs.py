@@ -151,3 +151,59 @@ def gradient(
         method, solvent, engine, preset, properties, charge, multiplicity, keywords
     )
     return _core.Calculation(options).Gradient(mol)
+
+
+_ALGORITHMS = {
+    "auto": _core.Algorithm_AUTO,
+    "anc_rfo": _core.Algorithm_ANC_RFO,
+    "lbfgs": _core.Algorithm_LBFGS,
+}
+
+
+def _algorithm(value: Any) -> int:
+    if isinstance(value, str):
+        try:
+            return _ALGORITHMS[value.lower()]
+        except KeyError:
+            raise _core.OptionsError(
+                f"unknown algorithm {value!r}; expected auto, anc_rfo, or lbfgs"
+            ) from None
+    return int(value)
+
+
+def optimize(
+    mol: Any,
+    method: Any = "gfn2-xtb",
+    *,
+    constraints: Any = None,
+    algorithm: Any = "auto",
+    max_iterations: int | None = None,
+    solvent: Any = None,
+    engine: str | None = None,
+    preset: Any = "standard",
+    properties: Iterable[Any] = (),
+    charge: int | None = None,
+    multiplicity: int | None = None,
+    keywords: Mapping[str, Any] | None = None,
+) -> Any:
+    """Optimize every conformer of ``mol`` and write the final coordinates back.
+
+    Shared parameters match :func:`energy`. Building the options and the calculation holds the
+    GIL; only the optimization releases it, after copying the optimizer options, so do not pass
+    the same molecule to calculations on more than one thread at a time.
+
+    :param constraints: A :class:`ConstraintSet` of frozen atoms, constraints, and restraints.
+    :param algorithm: ``"auto"``, ``"anc_rfo"``, ``"lbfgs"``, or an :class:`Algorithm`.
+    :param max_iterations: Overrides the preset's iteration limit.
+    :returns: A :class:`ResultSet` with one result per conformer.
+    """
+    options = _calculation_options(
+        method, solvent, engine, preset, properties, charge, multiplicity, keywords
+    )
+    optimizer = _core.OptimizerOptions()
+    optimizer.SetAlgorithm(_algorithm(algorithm))
+    if max_iterations is not None:
+        optimizer.SetMaxIterations(int(max_iterations))
+    if constraints is not None:
+        optimizer.SetConstraints(constraints)
+    return _core.Calculation(options).Optimize(mol, optimizer)

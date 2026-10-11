@@ -559,7 +559,7 @@ _preload_bundled_libs()
 _load_cached_extension_if_needed()
 _check_openeye_version()
 
-from ._verbs import energy, gradient
+from ._verbs import energy, gradient, optimize
 from .oevibe import (
     Algorithm,
     Calculation,
@@ -610,4 +610,5 @@ __all__ = [
     "__version_info__",
     "energy",
     "gradient",
+    "optimize",
 ]

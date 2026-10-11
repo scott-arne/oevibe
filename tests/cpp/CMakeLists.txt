@@ -28,6 +28,7 @@ add_executable(oevibe_tests
     test_result.cpp
     test_sha256.cpp
     test_calculation.cpp
+    test_calculation_optimize.cpp
     test_geometry.cpp
     test_constraint_math.cpp
     test_model_hessian.cpp

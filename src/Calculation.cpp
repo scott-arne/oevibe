@@ -5,7 +5,9 @@
 #include <cmath>
 #include <memory>
 
+#include "core/ConstraintMath.h"
 #include "core/InputPrep.h"
+#include "core/Optimizer.h"
 #include "core/Sha256.h"
 #include "core/WriteBack.h"
 #include "oevibe/EngineRegistry.h"
@@ -272,6 +274,83 @@ ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
     }
     results.Finalize();
     detail::write_back(mol, system, results, options_, settings_.solvent.GetTag(), false);
+    return results;
+}
+
+ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& options) {
+    const Clock::time_point call_start = Clock::now();
+    options.Validate();
+    CallState state = Prepare(mol);
+    const MolecularSystem& system = *state.system;
+    detail::check_constraint_atoms(options.GetConstraints(), system);
+    const ResolvedOptimizerSettings resolved_settings = resolve_optimizer_settings(
+        options, settings_.preset, system.NumAtoms(), capabilities_.force_field);
+    const double setup_seconds = seconds_since(call_start);
+
+    std::map<std::string, std::string> resolved = CallResolvedOptions(state, "optimize");
+    const ConstraintSet& constraints = options.GetConstraints();
+    resolved["optimizer.algorithm"] = algorithm_name(resolved_settings.algorithm);
+    resolved["optimizer.max_iterations"] = std::to_string(resolved_settings.max_iterations);
+    resolved["optimizer.energy_change"] = detail::format_value(resolved_settings.energy_change);
+    resolved["optimizer.gradient_norm"] = detail::format_value(resolved_settings.gradient_norm);
+    resolved["optimizer.initial_trust_radius"] =
+        detail::format_value(resolved_settings.initial_trust_radius);
+    resolved["optimizer.max_trust_radius"] =
+        detail::format_value(resolved_settings.max_trust_radius);
+    resolved["optimizer.frozen_atoms"] = std::to_string(constraints.GetFrozenAtoms().size());
+    resolved["optimizer.constraints"] = std::to_string(constraints.GetConstraints().size());
+    resolved["optimizer.restraints"] = std::to_string(constraints.GetRestraints().size());
+
+    ResultSet results;
+    for (unsigned position = 0; position < system.NumConformers(); ++position) {
+        ConformerResult result = NewResult(state, position, resolved);
+        const Clock::time_point start = Clock::now();
+        try {
+            std::shared_ptr<EngineSession> session = engine_->CreateSession(system, settings_);
+            const std::vector<double>& x0 = system.GetConformerCoordinates(position);
+            detail::OptimizationProblem problem;
+            problem.x0 = x0;
+            problem.atomic_numbers = system.GetAtomicNumbers();
+            problem.constraints = detail::resolve_constraint_set(constraints, system, x0);
+            problem.settings = resolved_settings;
+            const detail::OptimizationOutcome outcome = detail::run_optimization(*session, problem);
+            result.SetEnergy(outcome.engine_energy);
+            result.SetCoordinates(system.ToOELayout(outcome.x));
+            result.SetOptimizationStats(outcome.stats);
+            bool properties_ok = true;
+            if (settings_.properties != 0) {
+                EvaluationRequest request;
+                request.properties = settings_.properties;
+                const Evaluation evaluation = session->Evaluate(outcome.x, request);
+                const std::string problem_text =
+                    validate_evaluation(evaluation, request, system.NumAtoms());
+                if (problem_text.empty()) {
+                    apply_evaluation(result, evaluation, request, system);
+                } else {
+                    properties_ok = false;
+                    result.SetStatus(ConformerStatus::ENGINE_ERROR,
+                                     "engine returned a malformed Evaluation: " + problem_text);
+                }
+            }
+            if (properties_ok) {
+                result.SetStatus(
+                    outcome.converged ? ConformerStatus::OK : ConformerStatus::NOT_CONVERGED,
+                    outcome.converged ? "" : outcome.message);
+            }
+        } catch (const UnsupportedError& e) {
+            result.SetStatus(ConformerStatus::UNSUPPORTED, e.what());
+        } catch (const std::exception& e) {
+            result.SetStatus(ConformerStatus::ENGINE_ERROR, e.what());
+        }
+        Timings timings;
+        timings.setup = setup_seconds;
+        timings.compute = seconds_since(start);
+        timings.total = seconds_since(call_start);
+        result.SetTimings(timings);
+        results.Add(std::move(result));
+    }
+    results.Finalize();
+    detail::write_back(mol, system, results, options_, settings_.solvent.GetTag(), true);
     return results;
 }
 

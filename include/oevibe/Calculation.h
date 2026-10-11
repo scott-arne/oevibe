@@ -26,6 +26,11 @@ public:
     ResultSet Energy(OEChem::OEMolBase& mol);
     /// :raises InputError: When the molecule fails validation; nothing runs then.
     ResultSet Gradient(OEChem::OEMolBase& mol);
+    /// Optimizes every conformer (spec 7.1) and writes final coordinates back unless disabled.
+    /// :raises OptionsError: When the optimizer options are invalid.
+    /// :raises InputError: When the molecule fails validation or a constraint names an atom
+    ///     that is not in the molecule; nothing runs then.
+    ResultSet Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& options);
 
     const CalculationOptions& GetOptions() const;
     const std::string& GetEngineName() const;
