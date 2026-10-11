@@ -107,6 +107,56 @@ TEST(AncRfoTest, SatisfiesAnUnsatisfiedDistanceConstraint) {
     EXPECT_LE(result.max_distance_residual, 1e-4);
 }
 
+// Compressing a bond makes the constraint curvature (-lambda * Hessian of c) significant, which
+// a BFGS update fed with the plain energy gradient cannot learn.
+TEST(AncRfoTest, SatisfiesACompressedDistanceConstraint) {
+    const std::vector<double> reference = test::sample_geometry();
+    detail::AncRfoProblem problem = carbons(6);
+    detail::ResolvedConstraint bond;
+    bond.kind = ConstraintKind::DISTANCE;
+    bond.atoms = {0, 1};
+    bond.target = detail::distance(reference.data(), 0, 1, nullptr) - 0.3;
+    problem.constraints = {bond};
+    const detail::MinimizerResult result =
+        detail::anc_rfo_minimize(springs(reference), reference, problem, tight());
+    ASSERT_TRUE(result.converged) << result.message;
+    EXPECT_LE(result.max_distance_residual, detail::DISTANCE_RESIDUAL_TOLERANCE);
+    EXPECT_NEAR(detail::distance(result.x.data(), 0, 1, nullptr), bond.target,
+                detail::DISTANCE_RESIDUAL_TOLERANCE);
+}
+
+TEST(AncRfoTest, ConvergesImmediatelyWhenFrozenAtomsAlreadySatisfyTheConstraints) {
+    const std::vector<double> reference = test::sample_geometry();
+    const std::vector<double> start = test::perturbed(reference, 0.1);
+    detail::AncRfoProblem problem = carbons(6);
+    problem.frozen = {0, 1, 2, 3, 4, 5};
+    detail::ResolvedConstraint bond;
+    bond.kind = ConstraintKind::DISTANCE;
+    bond.atoms = {0, 1};
+    bond.target = detail::distance(start.data(), 0, 1, nullptr);
+    problem.constraints = {bond};
+    const detail::MinimizerResult result =
+        detail::anc_rfo_minimize(springs(reference), start, problem, tight());
+    EXPECT_TRUE(result.converged) << result.message;
+    EXPECT_EQ(result.iterations, 0u);
+}
+
+TEST(AncRfoTest, ReportsFrozenAtomsThatCannotSatisfyTheConstraints) {
+    const std::vector<double> reference = test::sample_geometry();
+    detail::AncRfoProblem problem = carbons(6);
+    problem.frozen = {0, 1, 2, 3, 4, 5};
+    detail::ResolvedConstraint bond;
+    bond.kind = ConstraintKind::DISTANCE;
+    bond.atoms = {0, 1};
+    bond.target = detail::distance(reference.data(), 0, 1, nullptr) + 0.3;
+    problem.constraints = {bond};
+    const detail::MinimizerResult result =
+        detail::anc_rfo_minimize(springs(reference), reference, problem, tight());
+    EXPECT_FALSE(result.converged);
+    EXPECT_NE(result.message.find("constraints"), std::string::npos) << result.message;
+    EXPECT_EQ(result.x, reference);
+}
+
 TEST(AncRfoTest, HoldsADihedralConstraint) {
     const std::vector<double> reference = test::sample_geometry();
     detail::AncRfoProblem problem = carbons(6);

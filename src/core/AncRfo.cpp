@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include "core/AncCoordinates.h"
 #include "core/ModelHessian.h"
@@ -28,6 +29,7 @@ VectorXd as_vector(const std::vector<double>& values) {
 struct ConstraintModel {
     MatrixXd tangent;     ///< m x (m - rank): directions that keep constraints to first order.
     VectorXd correction;  ///< m: minimum-norm step toward the constraint surface.
+    MatrixXd jacobian;    ///< k x 3N Cartesian with frozen atoms zeroed; empty if not built.
 };
 
 ConstraintModel linearize(const std::vector<ResolvedConstraint>& constraints,
@@ -35,7 +37,8 @@ ConstraintModel linearize(const std::vector<ResolvedConstraint>& constraints,
                           const MatrixXd& basis) {
     const Eigen::Index m = basis.cols();
     ConstraintModel model;
-    if (constraints.empty()) {
+    // With no free coordinates the SVD below would run on an empty matrix.
+    if (constraints.empty() || m == 0) {
         model.tangent = MatrixXd::Identity(m, m);
         model.correction = VectorXd::Zero(m);
         return model;
@@ -68,7 +71,22 @@ ConstraintModel linearize(const std::vector<ResolvedConstraint>& constraints,
         correction *= MAX_CORRECTION / norm;
     }
     model.correction = correction;
+    model.jacobian = std::move(jacobian);
     return model;
+}
+
+/// Change of the Lagrangian gradient in ANC coordinates between two geometries, with the
+/// least-squares multipliers taken at the new one (Baker, J. Comput. Chem. 13, 240, 1992).
+VectorXd lagrangian_gradient_change(const MatrixXd& basis, const VectorXd& old_gradient,
+                                    const VectorXd& new_gradient, const MatrixXd& old_jacobian,
+                                    const MatrixXd& new_jacobian) {
+    const VectorXd new_gradient_anc = basis.transpose() * new_gradient;
+    const MatrixXd constraint_gradients = (new_jacobian * basis).transpose();  // m x k
+    const VectorXd multipliers =
+        constraint_gradients.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV)
+            .solve(new_gradient_anc);
+    return basis.transpose() * (new_gradient - old_gradient) -
+           basis.transpose() * ((new_jacobian - old_jacobian).transpose() * multipliers);
 }
 
 }  // namespace
@@ -152,7 +170,9 @@ MinimizerResult anc_rfo_minimize(const ObjectiveFn& objective, std::vector<doubl
             break;
         }
         if (basis.vectors.cols() == 0) {
-            result.message = "no free coordinates remain";
+            result.message = constrained && !residuals_ok
+                                 ? "no free coordinates remain to satisfy the constraints"
+                                 : "no free coordinates remain";
             break;
         }
         if (iteration >= settings.max_iterations) {
@@ -194,12 +214,17 @@ MinimizerResult anc_rfo_minimize(const ObjectiveFn& objective, std::vector<doubl
         } else if (ratio < 0.25) {
             trust = std::max(0.25 * trust, MIN_TRUST_RADIUS);
         }
-        // Under constraints the Lagrangian Hessian matters, so the update sees only the
-        // tangent part of the gradient change.
-        const VectorXd difference = basis.vectors.transpose() * as_vector(trial_gradient) - g_anc;
-        const VectorXd curvature =
-            constrained ? VectorXd(model.tangent * (model.tangent.transpose() * difference))
-                        : difference;
+        // Under constraints the model Hessian has to approximate the Lagrangian Hessian, which
+        // includes the constraint curvature -lambda * Hessian(c). The plain energy-gradient
+        // difference omits that term, leaving the model too soft along constrained paths.
+        VectorXd curvature = basis.vectors.transpose() * as_vector(trial_gradient) - g_anc;
+        if (constrained) {
+            const ConstraintModel trial_model =
+                linearize(problem.constraints, trial, problem.frozen, basis.vectors);
+            curvature = lagrangian_gradient_change(basis.vectors, as_vector(gradient),
+                                                   as_vector(trial_gradient), model.jacobian,
+                                                   trial_model.jacobian);
+        }
         bfgs_update(hessian, step, curvature);
 
         x = std::move(trial);
