@@ -120,6 +120,7 @@ set(OEVIBE_SOURCES
     src/core/AncCoordinates.cpp
     src/core/Lbfgs.cpp
     src/core/AncRfo.cpp
+    src/core/Optimizer.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
