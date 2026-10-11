@@ -60,7 +60,9 @@ target_compile_definitions(oevibe_eigen INTERFACE Eigen=OEVibeEigen)
 
 if(OEVIBE_BUILD_PYTHON)
     find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
-    find_package(SWIG 4.0)
+    # Required so that a Python build without SWIG fails at configure time instead of skipping
+    # the module.
+    find_package(SWIG 4.0 REQUIRED)
 endif()
 
 if(OPENEYE_USE_SHARED)
@@ -155,7 +157,7 @@ if(OEVIBE_BUILD_TESTS)
 endif()
 
 # Python bindings
-if(OEVIBE_BUILD_PYTHON AND SWIG_FOUND)
+if(OEVIBE_BUILD_PYTHON)
     add_subdirectory(swig)
 endif()
 

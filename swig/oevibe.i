@@ -432,9 +432,22 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 }
 %}
 
+// The %init block below runs inside a function whose failure value depends on the SWIG
+// version. SWIG 4.4 introduced multi-phase initialization, which emits %init code into
+// SWIG_mod_exec, a Py_mod_exec slot returning int (-1 on failure); earlier versions emit it into
+// the single-phase PyInit function, which returns the module object (NULL on failure). This
+// SWIG_VERSION is SWIG's own version, defined by the SWIG preprocessor in every release.
+#if SWIG_VERSION >= 0x040400
+%{
+#define OEVIBE_INIT_FAILURE -1
+%}
+#else
+%{
+#define OEVIBE_INIT_FAILURE NULL
+%}
+#endif
+
 %init %{
-    /* SWIG 4.5 emits this block into SWIG_mod_exec, a Py_mod_exec slot returning int: 0 for
-       success, -1 for failure. */
     if (oevibe_add_exception(m, &g_oevibe_error, "oevibe.OEVibeError", "OEVibeError",
                              PyExc_RuntimeError) < 0 ||
         oevibe_add_exception(m, &g_options_error, "oevibe.OptionsError", "OptionsError",
@@ -445,7 +458,7 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
                              g_oevibe_error) < 0 ||
         oevibe_add_exception(m, &g_unsupported_error, "oevibe.UnsupportedError",
                              "UnsupportedError", g_oevibe_error) < 0) {
-        return -1;
+        return OEVIBE_INIT_FAILURE;
     }
 %}
 
@@ -574,6 +587,9 @@ same molecule must not be passed to calculations from more than one thread at a 
 %ignore std::vector<OEVIBE::BondOrder>::swap;
 %ignore std::vector<OEVIBE::BondOrder>::__setitem__;
 %ignore std::vector<OEVIBE::BondOrder>::__delitem__;
+// SWIG releases before 4.5 also generate the Python 2 slice methods.
+%ignore std::vector<OEVIBE::BondOrder>::__setslice__;
+%ignore std::vector<OEVIBE::BondOrder>::__delslice__;
 %template(BondOrderVector) std::vector<OEVIBE::BondOrder>;
 %include "oevibe/Constraints.h"
 %include "oevibe/Options.h"
