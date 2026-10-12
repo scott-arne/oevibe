@@ -35,6 +35,7 @@ add_executable(oevibe_tests
     test_lbfgs.cpp
     test_anc_rfo.cpp
     test_optimizer.cpp
+    test_runtime_library.cpp
 )
 
 target_link_libraries(oevibe_tests

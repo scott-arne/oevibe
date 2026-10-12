@@ -123,6 +123,7 @@ set(OEVIBE_SOURCES
     src/core/Lbfgs.cpp
     src/core/AncRfo.cpp
     src/core/Optimizer.cpp
+    src/engines/RuntimeLibrary.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
@@ -148,6 +149,7 @@ target_link_libraries(oevibe
         OpenEye::OEQuacpac
     PRIVATE
         $<BUILD_INTERFACE:oevibe_eigen>
+        ${CMAKE_DL_LIBS}
 )
 
 # Tests
