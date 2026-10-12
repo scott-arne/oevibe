@@ -124,6 +124,8 @@ set(OEVIBE_SOURCES
     src/core/AncRfo.cpp
     src/core/Optimizer.cpp
     src/engines/RuntimeLibrary.cpp
+    src/engines/TbliteLibrary.cpp
+    src/engines/TbliteEngine.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

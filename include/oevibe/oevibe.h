@@ -22,5 +22,6 @@
 #include "oevibe/Units.h"
 #include "oevibe/engines/OEFFEngine.h"
 #include "oevibe/engines/RuntimeLibraries.h"
+#include "oevibe/engines/TbliteEngine.h"
 
 #endif  // OEVIBE_H
