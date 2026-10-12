@@ -226,6 +226,56 @@ TEST(OptimizerTest, FailuresCarryTheLastAcceptedIterate) {
         FAIL() << "expected detail::OptimizationFailure";
     } catch (const detail::OptimizationFailure& e) {
         EXPECT_FALSE(e.HasPartialOutcome());
+        // An exception carries no energy, unlike a malformed evaluation.
+        EXPECT_FALSE(e.HasStartEnergy());
+        EXPECT_THROW(e.GetStartEnergy(), std::logic_error);
+    }
+}
+
+// A single point keeps the finite energy of a malformed evaluation (spec 7.5). The first
+// evaluation of an optimization is that single point, so its failure carries the energy.
+TEST(OptimizerTest, AMalformedFirstEvaluationCarriesItsFiniteEnergy) {
+    const OEChem::OEMol mol = test::make_conformers("CCCCO");
+    const MolecularSystem system(mol, 0, 1);
+    const std::vector<double> reference = system.GetConformerCoordinates(0);
+    const std::vector<double> start = test::perturbed(reference, 0.08);
+    for (Algorithm algorithm : {Algorithm::LBFGS, Algorithm::ANC_RFO}) {
+        SCOPED_TRACE(algorithm_name(algorithm));
+        test::FakeEngine engine("optimizer-malformed-start");
+        engine.mode = test::FakeMode::MALFORMED_GRADIENT;
+        auto session = engine.CreateSession(system, EngineSettings());
+        detail::OptimizationProblem problem;
+        problem.x0 = start;
+        problem.atomic_numbers = system.GetAtomicNumbers();
+        problem.settings = settings_for(algorithm);
+        try {
+            detail::run_optimization(*session, problem);
+            FAIL() << "expected detail::OptimizationFailure";
+        } catch (const detail::OptimizationFailure& e) {
+            EXPECT_NE(std::string(e.what()).find("gradient"), std::string::npos) << e.what();
+            EXPECT_FALSE(e.HasPartialOutcome());
+            ASSERT_TRUE(e.HasStartEnergy());
+            EXPECT_NEAR(e.GetStartEnergy(),
+                        test::spring_energy(reference, start, engine.force_constant, nullptr),
+                        1e-9);
+        }
+    }
+
+    // Once the minimizer has accepted an iterate, the partial outcome reports it instead.
+    test::FakeEngine late("optimizer-malformed-late");
+    late.mode = test::FakeMode::MALFORMED_GRADIENT;
+    late.healthy_evaluations = 5;
+    auto session = late.CreateSession(system, EngineSettings());
+    detail::OptimizationProblem problem;
+    problem.x0 = start;
+    problem.atomic_numbers = system.GetAtomicNumbers();
+    problem.settings = settings_for(Algorithm::ANC_RFO);
+    try {
+        detail::run_optimization(*session, problem);
+        FAIL() << "expected detail::OptimizationFailure";
+    } catch (const detail::OptimizationFailure& e) {
+        EXPECT_TRUE(e.HasPartialOutcome());
+        EXPECT_FALSE(e.HasStartEnergy());
     }
 }
 

@@ -3,6 +3,8 @@
 
 #include <oechem.h>
 
+#include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -37,9 +39,20 @@ public:
 
 private:
     struct CallState;
+    /// One conformer's computation inside ``RunConformers``. On success it sets the values and
+    /// the final status; on failure it throws, after setting the values that spec 7.5 keeps.
+    using ConformerBody = std::function<void(ConformerResult& result, unsigned position)>;
 
     CallState Prepare(OEChem::OEMolBase& mol) const;
     ResultSet RunSinglePoints(OEChem::OEMolBase& mol, bool gradient);
+    /// Runs ``body`` once per conformer on a fresh ``NewResult`` and applies spec 7.5 to its
+    /// exceptions: ``UnsupportedError`` discards everything ``body`` set and gives UNSUPPORTED;
+    /// any other ``std::exception`` keeps those values and gives ENGINE_ERROR with its text.
+    /// Then records timings, finalizes the results, and writes them back (spec 6.5).
+    ResultSet RunConformers(OEChem::OEMolBase& mol, const CallState& state,
+                            const std::map<std::string, std::string>& resolved,
+                            std::chrono::steady_clock::time_point call_start, double setup_seconds,
+                            bool write_coordinates, const ConformerBody& body);
     ConformerResult NewResult(const CallState& state, unsigned position,
                               const std::map<std::string, std::string>& resolved) const;
     /// :returns: How the snapshot's partial charges are prepared for the resolved method.

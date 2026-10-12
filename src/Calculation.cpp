@@ -317,40 +317,22 @@ ConformerResult Calculation::NewResult(const CallState& state, unsigned position
     return result;
 }
 
-ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
-    const Clock::time_point call_start = Clock::now();
-    CallState state = Prepare(mol);
-    const double setup_seconds = seconds_since(call_start);
+ResultSet Calculation::RunConformers(OEChem::OEMolBase& mol, const CallState& state,
+                                     const std::map<std::string, std::string>& resolved,
+                                     Clock::time_point call_start, double setup_seconds,
+                                     bool write_coordinates, const ConformerBody& body) {
     const MolecularSystem& system = *state.system;
-    const std::map<std::string, std::string> resolved =
-        CallResolvedOptions(state, gradient ? "gradient" : "energy");
-    EvaluationRequest request;
-    request.gradient = gradient;
-    request.properties = settings_.properties;
-
     ResultSet results;
     for (unsigned position = 0; position < system.NumConformers(); ++position) {
         ConformerResult result = NewResult(state, position, resolved);
+        // Spec 7.5: an UNSUPPORTED conformer keeps no values, whatever the body set before the
+        // engine reported the system unsupported, so that case restores this copy.
+        const ConformerResult initial = result;
         const Clock::time_point start = Clock::now();
         try {
-            std::shared_ptr<EngineSession> session =
-                create_session(*engine_, engine_name_, system, settings_);
-            const Evaluation evaluation =
-                session->Evaluate(system.GetConformerCoordinates(position), request);
-            const std::string problem = validate_evaluation(evaluation, request, system.NumAtoms());
-            if (problem.empty()) {
-                apply_evaluation(result, evaluation, request, system);
-                result.SetStatus(ConformerStatus::OK, "");
-            } else {
-                // Spec 7.5: a failed conformer keeps the values computed before the failure.
-                // Only the energy is trusted; the rest of a malformed evaluation is dropped.
-                if (std::isfinite(evaluation.energy)) {
-                    result.SetEnergy(evaluation.energy);
-                }
-                result.SetStatus(ConformerStatus::ENGINE_ERROR,
-                                 "engine returned a malformed Evaluation: " + problem);
-            }
+            body(result, position);
         } catch (const UnsupportedError& e) {
+            result = initial;
             result.SetStatus(ConformerStatus::UNSUPPORTED, e.what());
         } catch (const std::exception& e) {
             result.SetStatus(ConformerStatus::ENGINE_ERROR, e.what());
@@ -363,8 +345,41 @@ ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
         results.Add(std::move(result));
     }
     results.Finalize();
-    detail::write_back(mol, system, results, options_, settings_.solvent.GetTag(), false);
+    detail::write_back(mol, system, results, options_, settings_.solvent.GetTag(),
+                       write_coordinates);
     return results;
+}
+
+ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
+    const Clock::time_point call_start = Clock::now();
+    CallState state = Prepare(mol);
+    const double setup_seconds = seconds_since(call_start);
+    const MolecularSystem& system = *state.system;
+    const std::map<std::string, std::string> resolved =
+        CallResolvedOptions(state, gradient ? "gradient" : "energy");
+    EvaluationRequest request;
+    request.gradient = gradient;
+    request.properties = settings_.properties;
+
+    return RunConformers(
+        mol, state, resolved, call_start, setup_seconds, false,
+        [&](ConformerResult& result, unsigned position) {
+            std::shared_ptr<EngineSession> session =
+                create_session(*engine_, engine_name_, system, settings_);
+            const Evaluation evaluation =
+                session->Evaluate(system.GetConformerCoordinates(position), request);
+            const std::string problem = validate_evaluation(evaluation, request, system.NumAtoms());
+            if (!problem.empty()) {
+                // Spec 7.5: a failed conformer keeps the values computed before the failure.
+                // Only the energy is trusted; the rest of a malformed evaluation is dropped.
+                if (std::isfinite(evaluation.energy)) {
+                    result.SetEnergy(evaluation.energy);
+                }
+                throw std::runtime_error("engine returned a malformed Evaluation: " + problem);
+            }
+            apply_evaluation(result, evaluation, request, system);
+            result.SetStatus(ConformerStatus::OK, "");
+        });
 }
 
 ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& options) {
@@ -396,11 +411,9 @@ ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& 
     resolved["optimizer.constraints"] = encode_constraints(constraints.GetConstraints());
     resolved["optimizer.restraints"] = encode_restraints(constraints.GetRestraints());
 
-    ResultSet results;
-    for (unsigned position = 0; position < system.NumConformers(); ++position) {
-        ConformerResult result = NewResult(state, position, resolved);
-        const Clock::time_point start = Clock::now();
-        try {
+    return RunConformers(
+        mol, state, resolved, call_start, setup_seconds, true,
+        [&](ConformerResult& result, unsigned position) {
             std::shared_ptr<EngineSession> session =
                 create_session(*engine_, engine_name_, system, settings_);
             const std::vector<double>& x0 = system.GetConformerCoordinates(position);
@@ -409,55 +422,41 @@ ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& 
             problem.atomic_numbers = system.GetAtomicNumbers();
             problem.constraints = detail::resolve_constraint_set(constraints, system, x0);
             problem.settings = resolved_settings;
-            const detail::OptimizationOutcome outcome = detail::run_optimization(*session, problem);
+            detail::OptimizationOutcome outcome;
+            try {
+                outcome = detail::run_optimization(*session, problem);
+            } catch (const detail::OptimizationFailure& e) {
+                // Spec 7.5: an engine failure keeps the values computed before it. Write-back
+                // skips ENGINE_ERROR conformers, so the molecule keeps its input coordinates.
+                if (e.HasPartialOutcome()) {
+                    const detail::OptimizationOutcome& partial = e.GetPartialOutcome();
+                    result.SetEnergy(partial.engine_energy);
+                    result.SetCoordinates(system.ToOELayout(partial.x));
+                    result.SetOptimizationStats(partial.stats);
+                } else if (e.HasStartEnergy()) {
+                    result.SetEnergy(e.GetStartEnergy());
+                }
+                throw;
+            }
             result.SetEnergy(outcome.engine_energy);
             result.SetCoordinates(system.ToOELayout(outcome.x));
             result.SetOptimizationStats(outcome.stats);
-            bool properties_ok = true;
             if (settings_.properties != 0) {
                 EvaluationRequest request;
                 request.properties = settings_.properties;
                 const Evaluation evaluation = session->Evaluate(outcome.x, request);
                 const std::string problem_text =
                     validate_evaluation(evaluation, request, system.NumAtoms());
-                if (problem_text.empty()) {
-                    apply_evaluation(result, evaluation, request, system);
-                } else {
-                    properties_ok = false;
-                    result.SetStatus(ConformerStatus::ENGINE_ERROR,
-                                     "engine returned a malformed Evaluation: " + problem_text);
+                if (!problem_text.empty()) {
+                    throw std::runtime_error("engine returned a malformed Evaluation: " +
+                                             problem_text);
                 }
+                apply_evaluation(result, evaluation, request, system);
             }
-            if (properties_ok) {
-                result.SetStatus(
-                    outcome.converged ? ConformerStatus::OK : ConformerStatus::NOT_CONVERGED,
-                    outcome.converged ? "" : outcome.message);
-            }
-        } catch (const detail::OptimizationFailure& e) {
-            // Spec 7.5: an engine failure keeps the values computed before it. Write-back skips
-            // ENGINE_ERROR conformers, so the molecule keeps its input coordinates.
-            if (e.HasPartialOutcome()) {
-                const detail::OptimizationOutcome& partial = e.GetPartialOutcome();
-                result.SetEnergy(partial.engine_energy);
-                result.SetCoordinates(system.ToOELayout(partial.x));
-                result.SetOptimizationStats(partial.stats);
-            }
-            result.SetStatus(ConformerStatus::ENGINE_ERROR, e.what());
-        } catch (const UnsupportedError& e) {
-            result.SetStatus(ConformerStatus::UNSUPPORTED, e.what());
-        } catch (const std::exception& e) {
-            result.SetStatus(ConformerStatus::ENGINE_ERROR, e.what());
-        }
-        Timings timings;
-        timings.setup = setup_seconds;
-        timings.compute = seconds_since(start);
-        timings.total = seconds_since(call_start);
-        result.SetTimings(timings);
-        results.Add(std::move(result));
-    }
-    results.Finalize();
-    detail::write_back(mol, system, results, options_, settings_.solvent.GetTag(), true);
-    return results;
+            result.SetStatus(
+                outcome.converged ? ConformerStatus::OK : ConformerStatus::NOT_CONVERGED,
+                outcome.converged ? "" : outcome.message);
+        });
 }
 
 }  // namespace OEVIBE

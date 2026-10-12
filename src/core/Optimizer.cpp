@@ -1,6 +1,7 @@
 #include "core/Optimizer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -31,8 +32,9 @@ OptimizationStats stats_of(const MinimizerResult& result, unsigned evaluations,
 }  // namespace
 
 OptimizationFailure::OptimizationFailure(const std::string& message,
-                                         std::shared_ptr<const OptimizationOutcome> partial)
-    : std::runtime_error(message), partial_(std::move(partial)) {}
+                                         std::shared_ptr<const OptimizationOutcome> partial,
+                                         std::optional<double> start_energy)
+    : std::runtime_error(message), partial_(std::move(partial)), start_energy_(start_energy) {}
 
 bool OptimizationFailure::HasPartialOutcome() const { return partial_ != nullptr; }
 
@@ -41,6 +43,15 @@ const OptimizationOutcome& OptimizationFailure::GetPartialOutcome() const {
         throw std::logic_error("the optimization failed before any evaluation succeeded");
     }
     return *partial_;
+}
+
+bool OptimizationFailure::HasStartEnergy() const { return start_energy_.has_value(); }
+
+double OptimizationFailure::GetStartEnergy() const {
+    if (!start_energy_) {
+        throw std::logic_error("the optimization failure carries no start energy");
+    }
+    return *start_energy_;
 }
 
 OptimizationOutcome run_optimization(EngineSession& session, const OptimizationProblem& problem) {
@@ -52,6 +63,8 @@ OptimizationOutcome run_optimization(EngineSession& session, const OptimizationP
     double cached_engine = 0.0;
     double cached_restraint = 0.0;
     unsigned evaluations = 0;
+    // The finite energy of a malformed first evaluation, kept as a single point keeps it.
+    std::optional<double> start_energy;
 
     const ObjectiveFn objective = [&](const std::vector<double>& x,
                                       std::vector<double>& gradient) -> double {
@@ -65,6 +78,9 @@ OptimizationOutcome run_optimization(EngineSession& session, const OptimizationP
         ++evaluations;
         const std::string problem_text = validate_evaluation(evaluation, request, num_atoms);
         if (!problem_text.empty()) {
+            if (evaluations == 1 && std::isfinite(evaluation.energy)) {
+                start_energy = evaluation.energy;
+            }
             throw std::runtime_error("engine returned a malformed Evaluation: " + problem_text);
         }
         gradient = evaluation.gradient;
@@ -135,7 +151,9 @@ OptimizationOutcome run_optimization(EngineSession& session, const OptimizationP
             partial->engine_energy = last_iterate_engine;
             partial->stats = stats_of(last_iterate, evaluations, last_iterate_restraint);
         }
-        throw OptimizationFailure(e.what(), std::move(partial));
+        // An accepted iterate is the furthest point reached, so it supersedes the start energy.
+        throw OptimizationFailure(e.what(), std::move(partial),
+                                  have_iterate ? std::nullopt : start_energy);
     }
 
     OptimizationOutcome outcome;

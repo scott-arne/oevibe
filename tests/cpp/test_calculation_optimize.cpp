@@ -339,6 +339,69 @@ TEST(CalculationOptimizeTest, ImmediateEngineFailuresKeepNoValues) {
     EXPECT_FALSE(result.HasOptimizationStats());
 }
 
+// Spec 7.5: UNSUPPORTED keeps no values, even when the engine reports the system unsupported
+// only after the optimization has produced an energy, a geometry, and statistics.
+TEST(CalculationOptimizeTest, UnsupportedAfterTheOptimizationKeepsNoValues) {
+    const std::shared_ptr<test::FakeEngine> engine =
+        test::register_fake("optimize-unsupported-properties");
+    engine->mode = test::FakeMode::UNSUPPORTED_PROPERTIES;
+    CalculationOptions options = fake_options("optimize-unsupported-properties");
+    options.SetProperties(static_cast<unsigned>(Property::DIPOLE));
+    OEChem::OEMol mol = test::make_conformers("CCCCO");
+    jitter(mol);
+    const std::vector<double> before = coordinates_of(*mol.GetActive());
+    const ResultSet results = Calculation(options).Optimize(mol, OptimizerOptions());
+    const ConformerResult& result = results.Get(0);
+    EXPECT_EQ(result.GetStatus(), ConformerStatus::UNSUPPORTED);
+    EXPECT_NE(result.GetMessage().find("cannot compute properties"), std::string::npos)
+        << result.GetMessage();
+    EXPECT_FALSE(result.HasEnergy());
+    EXPECT_FALSE(result.HasCoordinates());
+    EXPECT_FALSE(result.HasOptimizationStats());
+    EXPECT_FALSE(result.HasDipole());
+    // What the result held before the optimization survives.
+    EXPECT_EQ(result.GetProvenance().engine, "optimize-unsupported-properties");
+    EXPECT_EQ(result.GetProvenance().resolved_options.at("task"), "optimize");
+    // Write-back leaves an UNSUPPORTED conformer's coordinates alone and writes no Energy tag.
+    EXPECT_EQ(coordinates_of(*mol.GetActive()), before);
+    EXPECT_EQ(OEChem::OEGetSDData(*mol.GetActive(), "OEVibe.fake-method.gas.Status"),
+              "UNSUPPORTED");
+    EXPECT_FALSE(OEChem::OEHasSDData(*mol.GetActive(), "OEVibe.fake-method.gas.Energy"));
+}
+
+// A Gradient call keeps the finite energy of a malformed evaluation; an optimization whose first
+// evaluation is malformed has computed exactly that single point, so it keeps the same energy.
+TEST(CalculationOptimizeTest, AMalformedFirstEvaluationKeepsItsEnergyLikeAGradient) {
+    const std::shared_ptr<test::FakeEngine> engine =
+        test::register_fake("optimize-malformed-start");
+    engine->mode = test::FakeMode::MALFORMED_GRADIENT;
+    OEChem::OEMol mol = test::make_conformers("CCCCO", 3);
+    ASSERT_GE(mol.NumConfs(), 2u);
+    OEChem::OEMol copy(mol);
+    const ResultSet gradients =
+        Calculation(fake_options("optimize-malformed-start")).Gradient(copy);
+    const std::vector<double> before = coordinates_of(*mol.GetActive());
+    const ResultSet results =
+        Calculation(fake_options("optimize-malformed-start")).Optimize(mol, OptimizerOptions());
+    ASSERT_EQ(results.Size(), gradients.Size());
+    for (std::size_t i = 0; i < results.Size(); ++i) {
+        SCOPED_TRACE(i);
+        const ConformerResult& result = results.Get(i);
+        EXPECT_EQ(result.GetStatus(), ConformerStatus::ENGINE_ERROR);
+        EXPECT_NE(result.GetMessage().find("malformed Evaluation"), std::string::npos)
+            << result.GetMessage();
+        ASSERT_TRUE(gradients.Get(i).HasEnergy());
+        ASSERT_TRUE(result.HasEnergy());
+        EXPECT_DOUBLE_EQ(result.GetEnergy(), gradients.Get(i).GetEnergy());
+        EXPECT_FALSE(result.HasCoordinates());
+        EXPECT_FALSE(result.HasOptimizationStats());
+    }
+    // Conformer 0 is the fake engine's reference, so only a later conformer shows that the kept
+    // energy is the computed one rather than a default zero.
+    EXPECT_GT(results.Get(1).GetEnergy(), 0.0);
+    EXPECT_EQ(coordinates_of(*mol.GetActive()), before);
+}
+
 TEST(CalculationOptimizeTest, NullSessionsBecomeEngineErrors) {
     const std::shared_ptr<test::FakeEngine> engine = test::register_fake("optimize-null-session");
     engine->null_session = true;
