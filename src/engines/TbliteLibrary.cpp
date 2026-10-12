@@ -129,6 +129,15 @@ std::string bind_tblite_api(const RuntimeLibrary& library, TbliteApi& api) {
     bind(library, "tblite_get_singlepoint", api.get_singlepoint, missing);
     bind(library, "tblite_get_result_energy", api.get_result_energy, missing);
     bind(library, "tblite_get_result_gradient", api.get_result_gradient, missing);
+    bind(library, "tblite_get_result_number_of_orbitals", api.get_result_number_of_orbitals,
+         missing);
+    bind(library, "tblite_get_result_number_of_spins", api.get_result_number_of_spins, missing);
+    bind(library, "tblite_get_result_charges", api.get_result_charges, missing);
+    bind(library, "tblite_get_result_dipole", api.get_result_dipole, missing);
+    bind(library, "tblite_get_result_bond_orders", api.get_result_bond_orders, missing);
+    bind(library, "tblite_get_result_orbital_energies", api.get_result_orbital_energies, missing);
+    bind(library, "tblite_get_result_orbital_occupations", api.get_result_orbital_occupations,
+         missing);
     return missing;
 }
 

@@ -62,6 +62,13 @@ struct TbliteApi {
     void (*get_singlepoint)(void* context, void* structure, void* calculator, void* result);
     void (*get_result_energy)(void* error, void* result, double* energy);
     void (*get_result_gradient)(void* error, void* result, double* gradient);
+    void (*get_result_number_of_orbitals)(void* error, void* result, int* orbitals);
+    void (*get_result_number_of_spins)(void* error, void* result, int* spins);
+    void (*get_result_charges)(void* error, void* result, double* charges);
+    void (*get_result_dipole)(void* error, void* result, double* dipole);
+    void (*get_result_bond_orders)(void* error, void* result, double* bond_orders);
+    void (*get_result_orbital_energies)(void* error, void* result, double* energies);
+    void (*get_result_orbital_occupations)(void* error, void* result, double* occupations);
 };
 
 /// Resolves every function of ``api`` from ``library``.

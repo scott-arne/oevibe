@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "engines/ElectronicProperties.h"
 #include "engines/RuntimeLibrary.h"
 #include "engines/TbliteLibrary.h"
 #include "oevibe/Error.h"
@@ -35,6 +36,10 @@ std::mutex& default_path_mutex() {
 std::string& default_path() {
     static std::string path;
     return path;
+}
+
+bool wants(unsigned properties, Property property) {
+    return (properties & static_cast<unsigned>(property)) != 0;
 }
 
 std::vector<double> to_bohr(const std::vector<double>& angstrom) {
@@ -81,9 +86,6 @@ public:
         if (request.hessian) {
             throw std::runtime_error("tblite provides no analytic Hessian");
         }
-        if (request.properties != 0) {
-            throw std::runtime_error("tblite sessions do not compute properties");
-        }
         const detail::TbliteApi& api = library_->api;
         const std::vector<double> positions = to_bohr(coords_angstrom);
         Evaluation evaluation;
@@ -104,6 +106,7 @@ public:
                 component *= Units::HARTREE_PER_BOHR_TO_KCAL_PER_ANGSTROM;
             }
         }
+        ReadProperties(request.properties, evaluation);
         return evaluation;
     }
 
@@ -194,6 +197,66 @@ private:
         }
         if (!failure.empty()) {
             throw std::runtime_error("tblite_calculator_push_back failed: " + failure);
+        }
+    }
+
+    /// Fills each requested property of the last single point; the caller holds the mutex.
+    void ReadProperties(unsigned properties, Evaluation& evaluation) {
+        const detail::TbliteApi& api = library_->api;
+        const std::size_t n = num_atoms_;
+        if (wants(properties, Property::CHARGES)) {
+            evaluation.charges.assign(n, 0.0);
+            api.get_result_charges(error_, result_, evaluation.charges.data());
+            CheckError("tblite_get_result_charges");
+        }
+        if (wants(properties, Property::DIPOLE)) {
+            evaluation.dipole.assign(3, 0.0);
+            api.get_result_dipole(error_, result_, evaluation.dipole.data());
+            CheckError("tblite_get_result_dipole");
+            for (double& component : evaluation.dipole) {
+                component *= Units::EBOHR_TO_DEBYE;
+            }
+        }
+        if (wants(properties, Property::BOND_ORDERS)) {
+            // An open-shell result writes a second num_atoms^2 block (measured with tblite
+            // 0.6.0: zeros, while the result reports one spin channel), so the buffer holds
+            // two and only the first is read.
+            std::vector<double> matrix(2 * n * n, 0.0);
+            api.get_result_bond_orders(error_, result_, matrix.data());
+            CheckError("tblite_get_result_bond_orders");
+            matrix.resize(n * n);
+            evaluation.bond_orders = detail::wiberg_pairs(matrix, num_atoms_);
+        }
+        if (wants(properties, Property::ORBITAL_ENERGIES)) {
+            int orbitals = 0;
+            int spins = 0;
+            api.get_result_number_of_orbitals(error_, result_, &orbitals);
+            CheckError("tblite_get_result_number_of_orbitals");
+            api.get_result_number_of_spins(error_, result_, &spins);
+            CheckError("tblite_get_result_number_of_spins");
+            if (spins != 1) {
+                throw std::runtime_error("tblite reported " + std::to_string(spins) +
+                                         " spin channels; only restricted results are read");
+            }
+            if (orbitals <= 0) {
+                throw std::runtime_error("tblite reported no orbitals");
+            }
+            const auto nao = static_cast<std::size_t>(orbitals);
+            // Energies come as one block of nao values; occupations as an alpha block and then a
+            // beta block of nao values each, every value in [0, 1] (measured with tblite 0.6.0).
+            std::vector<double> energies(nao, 0.0);
+            std::vector<double> occupations(2 * nao, 0.0);
+            api.get_result_orbital_energies(error_, result_, energies.data());
+            CheckError("tblite_get_result_orbital_energies");
+            api.get_result_orbital_occupations(error_, result_, occupations.data());
+            CheckError("tblite_get_result_orbital_occupations");
+            std::vector<double> spin_summed(nao, 0.0);
+            evaluation.orbital_energies.assign(nao, 0.0);
+            for (std::size_t k = 0; k < nao; ++k) {
+                evaluation.orbital_energies[k] = energies[k] * Units::HARTREE_TO_EV;
+                spin_summed[k] = occupations[k] + occupations[nao + k];
+            }
+            evaluation.homo_index = detail::homo_index(spin_summed);
         }
     }
 
@@ -363,6 +426,7 @@ std::vector<MethodCapabilities> TbliteEngine::GetMethods() const {
         MethodCapabilities caps;
         caps.method = Method(name);
         caps.solvent_models = {SolventModel::ALPB, SolventModel::GBSA};
+        caps.properties = ALL_PROPERTIES;
         caps.analytic_gradient = true;
         caps.open_shell = true;
         caps.elements = elements;

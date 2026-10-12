@@ -126,6 +126,7 @@ set(OEVIBE_SOURCES
     src/engines/RuntimeLibrary.cpp
     src/engines/TbliteLibrary.cpp
     src/engines/TbliteEngine.cpp
+    src/engines/ElectronicProperties.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

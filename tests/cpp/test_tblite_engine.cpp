@@ -210,7 +210,7 @@ TEST(TbliteEngineSchemaTest, MethodsAndKeywordsNeedNoLibrary) {
         EXPECT_FALSE(caps.charge_from_topology);
         EXPECT_FALSE(caps.requires_partial_charges);
         EXPECT_FALSE(caps.force_field);
-        EXPECT_EQ(caps.properties, 0u);
+        EXPECT_EQ(caps.properties, ALL_PROPERTIES);
         ASSERT_EQ(caps.elements.size(), 86u);
         EXPECT_EQ(caps.elements.front(), 1u);
         EXPECT_EQ(caps.elements.back(), 86u);
@@ -541,4 +541,130 @@ TEST_F(TbliteEngineTest, ConcurrentSessionsMatchSequentialResults) {
         EXPECT_EQ(failures[t], "") << "thread " << t;
         EXPECT_NEAR(energies[t], ETHANOL_GFN2 * Units::HARTREE_TO_KCAL, ENERGY_TOLERANCE);
     }
+}
+
+namespace {
+
+EvaluationRequest all_properties() {
+    EvaluationRequest request;
+    request.properties = ALL_PROPERTIES;
+    return request;
+}
+
+double sum_of(const std::vector<double>& values) {
+    double sum = 0.0;
+    for (double value : values) {
+        sum += value;
+    }
+    return sum;
+}
+
+}  // namespace
+
+// Reference values come from the same tblite 0.6.0 computation as the energies above, converted
+// from e Bohr and Hartree with the Units constants.
+TEST_F(TbliteEngineTest, WaterPropertiesAreValidAndPhysical) {
+    const OEChem::OEGraphMol h2o = water();
+    const MolecularSystem system(h2o, 0, 1);
+    auto session = Tblite().CreateSession(system, settings_for(GFN2_XTB));
+    const EvaluationRequest request = all_properties();
+    const Evaluation evaluation = session->Evaluate(system.GetConformerCoordinates(0), request);
+    ASSERT_EQ(validate_evaluation(evaluation, request, 3), "");
+
+    // Charges add up to the neutral total, with the oxygen negative and the hydrogens equal.
+    EXPECT_NEAR(sum_of(evaluation.charges), 0.0, 1e-6);
+    EXPECT_NEAR(evaluation.charges[0], -0.563507, 1e-5);
+    EXPECT_NEAR(evaluation.charges[1], evaluation.charges[2], 1e-6);
+
+    // 0.893520 e Bohr is 2.2711 D, along -z from the oxygen toward the hydrogens. The measured
+    // gas-phase dipole of water is 1.855 D, so the value is of the right size, and an
+    // unconverted e Bohr value would be off by the factor 2.54.
+    const std::vector<double>& dipole = evaluation.dipole;
+    EXPECT_NEAR(std::hypot(dipole[0], dipole[1], dipole[2]), 2.271102, 1e-3);
+    EXPECT_LT(dipole[2], 0.0);
+    EXPECT_NEAR(dipole[0], 0.0, 1e-6);
+    EXPECT_NEAR(dipole[1], 0.0, 1e-6);
+
+    // Two O-H single bonds, each a little below 1; the H-H order (4e-4) is under the cutoff.
+    ASSERT_EQ(evaluation.bond_orders.size(), 2u);
+    for (std::size_t k = 0; k < 2; ++k) {
+        EXPECT_EQ(evaluation.bond_orders[k].i, 0u);
+        EXPECT_EQ(evaluation.bond_orders[k].j, k + 1);
+        EXPECT_NEAR(evaluation.bond_orders[k].order, 0.9202, 1e-3);
+    }
+
+    // Six valence orbitals hold eight electrons, so the HOMO is orbital 3.
+    ASSERT_EQ(evaluation.orbital_energies.size(), 6u);
+    ASSERT_EQ(evaluation.homo_index, 3);
+    const double homo = evaluation.orbital_energies[3];
+    const double lumo = evaluation.orbital_energies[4];
+    EXPECT_NEAR(homo, -12.1769, 1e-3);
+    EXPECT_NEAR(lumo, 2.4528, 1e-3);
+    EXPECT_LT(homo, lumo);
+}
+
+TEST_F(TbliteEngineTest, PropertiesArePresentOnlyWhenRequested) {
+    const OEChem::OEGraphMol h2o = water();
+    const MolecularSystem system(h2o, 0, 1);
+    auto session = Tblite().CreateSession(system, settings_for(GFN2_XTB));
+    for (const Property property :
+         {Property::CHARGES, Property::DIPOLE, Property::ORBITAL_ENERGIES, Property::BOND_ORDERS}) {
+        EvaluationRequest request;
+        request.properties = static_cast<unsigned>(property);
+        const Evaluation evaluation = session->Evaluate(system.GetConformerCoordinates(0), request);
+        // validate_evaluation rejects any property that was returned without being requested.
+        EXPECT_EQ(validate_evaluation(evaluation, request, 3), "")
+            << property_names(request.properties);
+        EXPECT_EQ(evaluation.charges.empty(), property != Property::CHARGES);
+        EXPECT_EQ(evaluation.dipole.empty(), property != Property::DIPOLE);
+        EXPECT_EQ(evaluation.orbital_energies.empty(), property != Property::ORBITAL_ENERGIES);
+        EXPECT_EQ(evaluation.bond_orders.empty(), property != Property::BOND_ORDERS);
+    }
+}
+
+// An open-shell result writes 2 num_atoms^2 bond orders, which the sanitizer builds would catch
+// in a smaller buffer, and its HOMO comes from spin-summed occupations 2, 2, 1.5, 1.5, 0.
+TEST_F(TbliteEngineTest, ChargedAndOpenShellPropertiesFollowTheElectrons) {
+    const OEChem::OEGraphMol oh = hydroxyl();
+    const EvaluationRequest request = all_properties();
+
+    const MolecularSystem anion(oh, -1, 1);
+    const Evaluation hydroxide = Tblite()
+                                     .CreateSession(anion, settings_for(GFN2_XTB))
+                                     ->Evaluate(anion.GetConformerCoordinates(0), request);
+    ASSERT_EQ(validate_evaluation(hydroxide, request, 2), "");
+    EXPECT_NEAR(sum_of(hydroxide.charges), -1.0, 1e-6);
+    EXPECT_EQ(hydroxide.homo_index, 3);
+
+    const MolecularSystem radical(oh, 0, 2);
+    const Evaluation hydroxyl_radical = Tblite()
+                                            .CreateSession(radical, settings_for(GFN2_XTB))
+                                            ->Evaluate(radical.GetConformerCoordinates(0), request);
+    ASSERT_EQ(validate_evaluation(hydroxyl_radical, request, 2), "");
+    EXPECT_NEAR(sum_of(hydroxyl_radical.charges), 0.0, 1e-6);
+    ASSERT_EQ(hydroxyl_radical.orbital_energies.size(), 5u);
+    ASSERT_EQ(hydroxyl_radical.homo_index, 3);
+    EXPECT_NEAR(hydroxyl_radical.orbital_energies[3], -13.5764, 1e-3);
+    EXPECT_NEAR(hydroxyl_radical.orbital_energies[4], 2.9723, 1e-3);
+    ASSERT_EQ(hydroxyl_radical.bond_orders.size(), 1u);
+    EXPECT_NEAR(hydroxyl_radical.bond_orders[0].order, 0.8906, 1e-3);
+}
+
+TEST_F(TbliteEngineTest, BondOrdersFollowTheBonds) {
+    const OEChem::OEGraphMol etoh = ethanol();
+    const MolecularSystem system(etoh, 0, 1);
+    EvaluationRequest request;
+    request.properties = static_cast<unsigned>(Property::BOND_ORDERS);
+    const Evaluation evaluation = Tblite()
+                                      .CreateSession(system, settings_for(GFN2_XTB))
+                                      ->Evaluate(system.GetConformerCoordinates(0), request);
+    // Exactly the eight covalent bonds pass the 0.1 cutoff, each between 0.9 and 1.05.
+    std::vector<std::pair<unsigned, unsigned>> pairs;
+    for (const BondOrder& order : evaluation.bond_orders) {
+        pairs.emplace_back(order.i, order.j);
+        EXPECT_GT(order.order, 0.9);
+        EXPECT_LT(order.order, 1.05);
+    }
+    EXPECT_EQ(pairs, (std::vector<std::pair<unsigned, unsigned>>{
+                         {0, 1}, {0, 3}, {0, 4}, {0, 5}, {1, 2}, {1, 6}, {1, 7}, {2, 8}}));
 }
