@@ -390,7 +390,7 @@ KeywordSpec bounded_keyword(const char* name, KeywordType type, const char* desc
 
 }  // namespace
 
-/// Outcome of the first load: a usable library, or why there is none.
+/// Outcome of one attempt to load libtblite: a usable library, or why there is none.
 struct TbliteEngine::Loaded {
     std::shared_ptr<const detail::TbliteLibrary> library;  ///< Null when unavailable.
     std::string unavailable_reason;
@@ -454,13 +454,13 @@ void TbliteEngine::SetLibraryPath(const std::string& path) {
 std::string TbliteEngine::GetName() const { return "tblite"; }
 
 std::string TbliteEngine::GetVersion() const {
-    const Loaded& loaded = Load();
-    return loaded.library ? detail::tblite_version_text(loaded.library->version) : "";
+    const std::shared_ptr<const Loaded> loaded = Load();
+    return loaded->library ? detail::tblite_version_text(loaded->library->version) : "";
 }
 
-bool TbliteEngine::IsAvailable() const { return Load().library != nullptr; }
+bool TbliteEngine::IsAvailable() const { return Load()->library != nullptr; }
 
-std::string TbliteEngine::GetUnavailableReason() const { return Load().unavailable_reason; }
+std::string TbliteEngine::GetUnavailableReason() const { return Load()->unavailable_reason; }
 
 std::vector<MethodCapabilities> TbliteEngine::GetMethods() const {
     std::vector<unsigned> elements(86);
@@ -490,27 +490,37 @@ std::vector<KeywordSpec> TbliteEngine::GetKeywordSpecs() const {
 
 std::shared_ptr<EngineSession> TbliteEngine::CreateSession(const MolecularSystem& system,
                                                            const EngineSettings& settings) {
-    const Loaded& loaded = Load();
-    if (!loaded.library) {
+    const std::shared_ptr<const Loaded> loaded = Load();
+    if (!loaded->library) {
         throw EngineUnavailableError("engine 'tblite' is unavailable: " +
-                                     loaded.unavailable_reason);
+                                     loaded->unavailable_reason);
     }
     // Calculation validates at construction; direct callers get the same checks here, so the
     // session can parse the keywords without guarding.
     ValidateSettings(settings);
-    return std::make_shared<TbliteSession>(loaded.library, system, settings);
+    return std::make_shared<TbliteSession>(loaded->library, system, settings);
 }
 
-const TbliteEngine::Loaded& TbliteEngine::Load() const {
-    std::call_once(load_once_, [this]() {
-        std::string explicit_path = library_path_;
-        if (explicit_path.empty()) {
-            const std::lock_guard<std::mutex> lock(default_path_mutex());
-            explicit_path = default_path();
-        }
+std::shared_ptr<const TbliteEngine::Loaded> TbliteEngine::Load() const {
+    // ``load_mutex_`` is taken before the default-path mutex, never the other way round.
+    const std::lock_guard<std::mutex> lock(load_mutex_);
+    if (loaded_ && loaded_->library) {
+        return loaded_;
+    }
+    std::string explicit_path = library_path_;
+    if (explicit_path.empty()) {
+        const std::lock_guard<std::mutex> default_lock(default_path_mutex());
+        explicit_path = default_path();
+    }
+    // The registry's built-in reads the default path, and a status query can reach it before a
+    // caller sets the path, so a failed load is retried when the path it used has changed. An
+    // unchanged path keeps the failure, and a loaded library is never replaced.
+    if (!loaded_ || explicit_path != attempted_path_) {
         loaded_ = std::make_shared<const Loaded>(LoadFrom(explicit_path));
-    });
-    return *loaded_;
+        attempted_path_ = explicit_path;
+    }
+    // A caller may hold the returned outcome while a later call replaces a failed one.
+    return loaded_;
 }
 
 }  // namespace OEVIBE

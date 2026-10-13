@@ -303,6 +303,53 @@ TEST_F(TbliteEngineTest, ReportsTheLoadedVersion) {
     EXPECT_EQ(Tblite().GetUnavailableReason(), "");
 }
 
+// The registry's built-in has no path of its own, and anything that asks it a question (a
+// listing, a status check) may do so before a caller sets the default path. That early failure
+// must not freeze the instance unavailable. The failing path names a library that loads but is
+// not libtblite, which fails the same way wherever the test runs.
+TEST_F(TbliteEngineTest, AFailedLoadIsRetriedWhenTheDefaultPathChanges) {
+    const std::string rejected = test::unrelated_library_path();
+    const test::ScopedDefaultLibraryPath<TbliteEngine> default_path(rejected);
+    const TbliteEngine builtin;
+    ASSERT_FALSE(builtin.IsAvailable());
+    EXPECT_NE(builtin.GetUnavailableReason().find(rejected), std::string::npos)
+        << builtin.GetUnavailableReason();
+    EXPECT_EQ(builtin.GetVersion(), "");
+
+    TbliteEngine::SetLibraryPath(library_);
+    ASSERT_TRUE(builtin.IsAvailable()) << builtin.GetUnavailableReason();
+    EXPECT_EQ(builtin.GetUnavailableReason(), "");
+    EXPECT_EQ(builtin.GetVersion(), Tblite().GetVersion());
+}
+
+TEST_F(TbliteEngineTest, ARetriedLoadCreatesWorkingSessions) {
+    const test::ScopedDefaultLibraryPath<TbliteEngine> default_path(test::unrelated_library_path());
+    TbliteEngine builtin;
+    const OEChem::OEGraphMol h2o = water();
+    const MolecularSystem system(h2o, 0, 1);
+    EXPECT_THROW(builtin.CreateSession(system, settings_for(GFN2_XTB)), EngineUnavailableError);
+
+    TbliteEngine::SetLibraryPath(library_);
+    EXPECT_NEAR(energy_of(builtin, system, settings_for(GFN2_XTB)),
+                WATER_GFN2 * Units::HARTREE_TO_KCAL, ENERGY_TOLERANCE);
+}
+
+// The first successful load is final: the library is never reloaded or swapped for another.
+TEST_F(TbliteEngineTest, ASuccessfulLoadIsNotReplacedWhenTheDefaultPathChanges) {
+    const test::ScopedDefaultLibraryPath<TbliteEngine> default_path(library_);
+    TbliteEngine builtin;
+    ASSERT_TRUE(builtin.IsAvailable()) << builtin.GetUnavailableReason();
+    const std::string version = builtin.GetVersion();
+
+    TbliteEngine::SetLibraryPath("/nonexistent/lib/libtblite.0.dylib");
+    EXPECT_TRUE(builtin.IsAvailable());
+    EXPECT_EQ(builtin.GetVersion(), version);
+    const OEChem::OEGraphMol h2o = water();
+    const MolecularSystem system(h2o, 0, 1);
+    EXPECT_NEAR(energy_of(builtin, system, settings_for(GFN2_XTB)),
+                WATER_GFN2 * Units::HARTREE_TO_KCAL, ENERGY_TOLERANCE);
+}
+
 TEST_F(TbliteEngineTest, EnergiesMatchTheReferenceValues) {
     const OEChem::OEGraphMol h2o = water();
     const OEChem::OEGraphMol etoh = ethanol();

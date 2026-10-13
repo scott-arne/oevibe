@@ -12,16 +12,19 @@ namespace OEVIBE {
 
 /// GFN2-xTB and GFN1-xTB through libtblite, which is loaded at runtime and never linked
 /// (spec 8.3, 8.4). The library loads on the first call that needs it, so the Python package
-/// can pass its prefix first; that first load decides availability for the instance's lifetime.
-/// Every library call in the process is serialized by one mutex.
+/// can pass its prefix first. A successful load is kept for the instance's life. A failed one is
+/// kept only while the path it used stays the same: when the explicit path (the constructor's,
+/// else ``SetLibraryPath``'s) changes, the next call tries again. Every library call in the
+/// process is serialized by one mutex.
 class TbliteEngine : public Engine {
 public:
     /// :param library_path: Overrides discovery for this instance; empty uses SetLibraryPath's
     ///     value and then spec 8.3 discovery. The library loads lazily on first use.
     explicit TbliteEngine(std::string library_path = "");
 
-    /// Default explicit path for instances built without one (the registry's built-in). It is
-    /// read when an instance first loads, so it must be set before the engine is first queried.
+    /// Default explicit path for instances built without one (the registry's built-in). An
+    /// instance reads it whenever it has no loaded library, so setting it after an early query
+    /// that failed lets the next call retry, but it never moves an instance that has loaded.
     static void SetLibraryPath(const std::string& path);
 
     /// :returns: ``tblite``; never loads the library.
@@ -49,15 +52,18 @@ public:
 private:
     struct Loaded;
 
-    /// :returns: The outcome of the first load; later calls return the same outcome.
-    const Loaded& Load() const;
+    /// :returns: The outcome of the first load. A loaded library is kept for the engine's life;
+    ///     a failure is replaced only when the explicit path has changed since it. The caller's
+    ///     pointer keeps its outcome alive across such a replacement.
+    std::shared_ptr<const Loaded> Load() const;
     /// Opens the first usable candidate, binds the C API, and checks the version and the
     /// conda pairing (spec 8.3, 8.4).
     static Loaded LoadFrom(const std::string& explicit_path);
 
     std::string library_path_;
-    mutable std::once_flag load_once_;
+    mutable std::mutex load_mutex_;
     mutable std::shared_ptr<const Loaded> loaded_;
+    mutable std::string attempted_path_;  ///< The explicit path ``loaded_`` was loaded with.
 };
 
 }  // namespace OEVIBE

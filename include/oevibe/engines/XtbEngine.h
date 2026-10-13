@@ -19,14 +19,18 @@ struct XtbEngineState;
 /// ``gfn-ff`` is declared but unavailable: C API 1.0 keeps GFN-FF topology files in the process
 /// working directory, which OEVibe never changes. The library loads on first use rather than
 /// at construction, so the Python package can pass its library directory before discovery runs.
-/// One process-wide mutex serializes every libxtb call, because the C API is not thread-safe.
+/// A successful load is kept for the engine's life. A failed one is kept only while the path it
+/// used stays the same: when the explicit path (the constructor's, else ``SetLibraryPath``'s)
+/// changes, the next call tries again. One process-wide mutex serializes every libxtb call,
+/// because the C API is not thread-safe.
 class XtbEngine : public Engine {
 public:
     /// :param library_path: Overrides discovery for this instance; empty uses SetLibraryPath's
     ///     value and then spec 8.3 discovery. The library loads lazily on first use.
     explicit XtbEngine(std::string library_path = "");
     /// Default explicit path for instances built without one (the registry's built-in). An
-    /// instance reads it when it loads its library, so it must be set before first use.
+    /// instance reads it whenever it has no loaded library, so setting it after an early query
+    /// that failed lets the next call retry, but it never moves an instance that has loaded.
     static void SetLibraryPath(const std::string& path);
     /// :returns: ``xtb``; never loads the library.
     std::string GetName() const override;
@@ -52,12 +56,15 @@ public:
                                                  const EngineSettings& settings) override;
 
 private:
-    /// :returns: The load outcome, computed on the first call and kept for the engine's life.
-    const detail::XtbEngineState& Load() const;
+    /// :returns: The load outcome, computed on the first call. A loaded library is kept for the
+    ///     engine's life; a failure is replaced only when the explicit path has changed since
+    ///     it. The caller's pointer keeps its state alive across such a replacement.
+    std::shared_ptr<const detail::XtbEngineState> Load() const;
 
     std::string library_path_;
     mutable std::mutex load_mutex_;
     mutable std::shared_ptr<const detail::XtbEngineState> state_;
+    mutable std::string attempted_path_;  ///< The explicit path ``state_`` was loaded with.
 };
 
 }  // namespace OEVIBE

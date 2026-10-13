@@ -14,7 +14,7 @@ namespace OEVIBE {
 
 namespace detail {
 
-/// What loading libxtb found; built once per engine and never changed afterwards.
+/// What one attempt to load libxtb found; never changed after it is built.
 struct XtbEngineState {
     std::shared_ptr<const XtbLibrary> library;  ///< Null when the engine is unavailable.
     std::string unavailable_reason;
@@ -303,38 +303,46 @@ void XtbEngine::SetLibraryPath(const std::string& path) {
     value.path = path;
 }
 
-const detail::XtbEngineState& XtbEngine::Load() const {
+std::shared_ptr<const detail::XtbEngineState> XtbEngine::Load() const {
+    // ``load_mutex_`` is taken before the default-path mutex, never the other way round.
     std::lock_guard<std::mutex> lock(load_mutex_);
-    if (!state_) {
-        std::string explicit_path = library_path_;
-        if (explicit_path.empty()) {
-            DefaultLibraryPath& value = default_library_path();
-            std::lock_guard<std::mutex> default_lock(value.mutex);
-            explicit_path = value.path;
-        }
-        state_ = load_xtb(explicit_path);
+    if (state_ && state_->library) {
+        return state_;
     }
-    // The state is set once and never replaced, so the reference stays valid after unlocking.
-    return *state_;
+    std::string explicit_path = library_path_;
+    if (explicit_path.empty()) {
+        DefaultLibraryPath& value = default_library_path();
+        std::lock_guard<std::mutex> default_lock(value.mutex);
+        explicit_path = value.path;
+    }
+    // The registry's built-in reads the default path, and a method lookup reaches it before a
+    // caller can set the path, so a failed load is retried when the path it used has changed.
+    // An unchanged path keeps the failure, and a loaded library is never replaced.
+    if (!state_ || explicit_path != attempted_path_) {
+        state_ = load_xtb(explicit_path);
+        attempted_path_ = explicit_path;
+    }
+    // A caller may hold the returned state while a later call replaces a failed one.
+    return state_;
 }
 
 std::string XtbEngine::GetName() const { return "xtb"; }
 
 std::string XtbEngine::GetVersion() const {
-    const detail::XtbEngineState& state = Load();
-    if (!state.library) {
+    const std::shared_ptr<const detail::XtbEngineState> state = Load();
+    if (!state->library) {
         return "";
     }
     // C API 1.0 has no call that reports the xtb release, so the C API version stands in.
-    return "C API " + detail::xtb_api_version_text(state.library->GetApiVersion());
+    return "C API " + detail::xtb_api_version_text(state->library->GetApiVersion());
 }
 
-bool XtbEngine::IsAvailable() const { return Load().library != nullptr; }
+bool XtbEngine::IsAvailable() const { return Load()->library != nullptr; }
 
-std::string XtbEngine::GetUnavailableReason() const { return Load().unavailable_reason; }
+std::string XtbEngine::GetUnavailableReason() const { return Load()->unavailable_reason; }
 
 std::vector<MethodCapabilities> XtbEngine::GetMethods() const {
-    const detail::XtbEngineState& state = Load();
+    const std::shared_ptr<const detail::XtbEngineState> state = Load();
     MethodCapabilities gfn0;
     gfn0.method = Method(GFN0_XTB);
     // Spike S4: the C API returns charges, dipole, bond orders, and orbitals for GFN0-xTB, and
@@ -342,12 +350,12 @@ std::vector<MethodCapabilities> XtbEngine::GetMethods() const {
     gfn0.properties = ALL_PROPERTIES;
     gfn0.open_shell = true;
     gfn0.elements = supported_elements();
-    if (!state.library) {
+    if (!state->library) {
         gfn0.available = false;
-        gfn0.unavailable_reason = state.unavailable_reason;
-    } else if (state.gfn0_parameter_file.empty()) {
+        gfn0.unavailable_reason = state->unavailable_reason;
+    } else if (state->gfn0_parameter_file.empty()) {
         gfn0.available = false;
-        gfn0.unavailable_reason = state.gfn0_unavailable_reason;
+        gfn0.unavailable_reason = state->gfn0_unavailable_reason;
     }
 
     MethodCapabilities gfnff;
@@ -382,9 +390,9 @@ std::vector<KeywordSpec> XtbEngine::GetKeywordSpecs() const {
 
 std::shared_ptr<EngineSession> XtbEngine::CreateSession(const MolecularSystem& system,
                                                         const EngineSettings& settings) {
-    const detail::XtbEngineState& state = Load();
-    if (!state.library) {
-        throw EngineUnavailableError("engine 'xtb' is unavailable: " + state.unavailable_reason);
+    const std::shared_ptr<const detail::XtbEngineState> state = Load();
+    if (!state->library) {
+        throw EngineUnavailableError("engine 'xtb' is unavailable: " + state->unavailable_reason);
     }
     const std::string& method = settings.method.GetName();
     if (method == GFN_FF) {
@@ -394,16 +402,16 @@ std::shared_ptr<EngineSession> XtbEngine::CreateSession(const MolecularSystem& s
     if (method != GFN0_XTB) {
         throw OptionsError("engine 'xtb' does not provide method '" + method + "'");
     }
-    if (state.gfn0_parameter_file.empty()) {
+    if (state->gfn0_parameter_file.empty()) {
         throw EngineUnavailableError("method 'gfn0-xtb' of engine 'xtb' is unavailable: " +
-                                     state.gfn0_unavailable_reason);
+                                     state->gfn0_unavailable_reason);
     }
     if (!settings.solvent.IsGasPhase()) {
         throw OptionsError("method 'gfn0-xtb' supports gas phase only; solvent '" +
                            settings.solvent.GetName() + "' cannot be modeled");
     }
-    return std::make_shared<XtbSession>(state.library, system, settings.accuracy,
-                                        state.gfn0_parameter_file);
+    return std::make_shared<XtbSession>(state->library, system, settings.accuracy,
+                                        state->gfn0_parameter_file);
 }
 
 }  // namespace OEVIBE

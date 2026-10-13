@@ -230,6 +230,56 @@ TEST_F(XtbEngineTest, ReportsTheCApiVersion) {
     EXPECT_EQ(engine.GetVersion(), "C API 1.0.0");
 }
 
+// The registry's built-in has no path of its own, and a method lookup that reaches GetMethods
+// loads it, possibly before a caller sets the default path. That early failure must not freeze
+// the instance unavailable. The failing path names a library that loads but is not libxtb,
+// which fails the same way wherever the test runs.
+TEST_F(XtbEngineTest, AFailedLoadIsRetriedWhenTheDefaultPathChanges) {
+    const std::string rejected = test::unrelated_library_path();
+    const test::ScopedDefaultLibraryPath<XtbEngine> default_path(rejected);
+    const XtbEngine builtin;
+    ASSERT_FALSE(builtin.IsAvailable());
+    EXPECT_NE(builtin.GetUnavailableReason().find(rejected), std::string::npos)
+        << builtin.GetUnavailableReason();
+    EXPECT_EQ(builtin.GetVersion(), "");
+    const std::optional<MethodCapabilities> before = find_method(builtin, Method(GFN0_XTB));
+    ASSERT_TRUE(before.has_value());
+    EXPECT_FALSE(before->available);
+
+    XtbEngine::SetLibraryPath(library_);
+    ASSERT_TRUE(builtin.IsAvailable()) << builtin.GetUnavailableReason();
+    EXPECT_EQ(builtin.GetUnavailableReason(), "");
+    EXPECT_EQ(builtin.GetVersion(), "C API 1.0.0");
+    const std::optional<MethodCapabilities> after = find_method(builtin, Method(GFN0_XTB));
+    ASSERT_TRUE(after.has_value());
+    EXPECT_TRUE(after->available) << after->unavailable_reason;
+}
+
+TEST_F(XtbEngineTest, ARetriedLoadCreatesWorkingSessions) {
+    const test::ScopedDefaultLibraryPath<XtbEngine> default_path(test::unrelated_library_path());
+    XtbEngine builtin;
+    const MolecularSystem system = make_system(WATER, 0, 1);
+    EXPECT_THROW(builtin.CreateSession(system, gfn0_settings()), EngineUnavailableError);
+
+    XtbEngine::SetLibraryPath(library_);
+    EXPECT_NEAR(evaluate(builtin, system, WATER, EvaluationRequest()).energy,
+                WATER_ENERGY_EH * Units::HARTREE_TO_KCAL, 1e-6);
+}
+
+// The first successful load is final: the library is never reloaded or swapped for another.
+TEST_F(XtbEngineTest, ASuccessfulLoadIsNotReplacedWhenTheDefaultPathChanges) {
+    const test::ScopedDefaultLibraryPath<XtbEngine> default_path(library_);
+    XtbEngine builtin;
+    ASSERT_TRUE(builtin.IsAvailable()) << builtin.GetUnavailableReason();
+
+    XtbEngine::SetLibraryPath("/nonexistent/lib/libxtb.6.dylib");
+    EXPECT_TRUE(builtin.IsAvailable());
+    EXPECT_EQ(builtin.GetVersion(), "C API 1.0.0");
+    const MolecularSystem system = make_system(WATER, 0, 1);
+    EXPECT_NEAR(evaluate(builtin, system, WATER, EvaluationRequest()).energy,
+                WATER_ENERGY_EH * Units::HARTREE_TO_KCAL, 1e-6);
+}
+
 TEST_F(XtbEngineTest, DeclaresGfn0AndAnUnavailableGfnFf) {
     const XtbEngine engine(library_);
     ASSERT_EQ(engine.GetMethods().size(), 2u);

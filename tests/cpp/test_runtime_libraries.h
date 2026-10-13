@@ -37,6 +37,19 @@ inline std::string tblite_library_path() {
 /// :returns: ``OEVIBE_XTB_LIBRARY`` when it names an existing file, else an empty string.
 inline std::string xtb_library_path() { return library_from_environment("OEVIBE_XTB_LIBRARY"); }
 
+/// :returns: A library that loads on every machine and is neither libtblite nor libxtb, for an
+///     explicit path that an engine opens and then rejects. A missing file is no substitute: the
+///     system loader can match a library that is already loaded by its file name and succeed.
+///     libxtb is no substitute either, since it links libtblite, whose symbols a lookup in the
+///     libxtb handle then finds.
+inline const char* unrelated_library_path() {
+#ifdef __APPLE__
+    return "/usr/lib/libSystem.B.dylib";
+#else
+    return "libc.so.6";
+#endif
+}
+
 /// Sets or unsets one environment variable for a scope and restores its previous state.
 class ScopedEnvironment {
 public:
@@ -79,6 +92,18 @@ public:
 
 private:
     std::string previous_;
+};
+
+/// Sets an engine class's default library path (``SetLibraryPath``) for a scope and clears it
+/// afterwards, which is the state of every test that does not set one. The class has no getter,
+/// so a test that needs a different outer value must not use this guard.
+template <typename EngineType>
+class ScopedDefaultLibraryPath {
+public:
+    explicit ScopedDefaultLibraryPath(const std::string& path) { EngineType::SetLibraryPath(path); }
+    ~ScopedDefaultLibraryPath() { EngineType::SetLibraryPath(""); }
+    ScopedDefaultLibraryPath(const ScopedDefaultLibraryPath&) = delete;
+    ScopedDefaultLibraryPath& operator=(const ScopedDefaultLibraryPath&) = delete;
 };
 
 }  // namespace test

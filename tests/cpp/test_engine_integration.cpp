@@ -1,15 +1,21 @@
 #include <gtest/gtest.h>
 
 #include <oechem.h>
+#include <sys/wait.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <exception>
+#include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "engines/XtbLibrary.h"
 #include "oevibe/Calculation.h"
+#include "oevibe/EngineRegistry.h"
 #include "oevibe/Error.h"
 #include "oevibe/Preset.h"
 #include "oevibe/engines/TbliteEngine.h"
@@ -95,7 +101,89 @@ void expect_tblite_tasks(const std::string& library, const char* method, const S
     EXPECT_EQ(result.GetProvenance().resolved_options.at("optimizer.algorithm"), "anc_rfo");
 }
 
+/// Exit code of ``gfn0_after_an_early_custom_method_lookup`` when the failure it needs cannot be
+/// made, because the system loader finds libxtb by its bare name.
+constexpr int LOADER_FINDS_XTB = 77;
+
+/// Resolves a custom method before the default xtb path is set, as a C++ caller can, and then
+/// runs GFN0. Resolving asks every registered engine for its methods, the built-in xtb among
+/// them, which loads its library from the default path, and here that path fails.
+/// :returns: 0 when GFN0 then works, ``LOADER_FINDS_XTB`` when no early failure could be made,
+///     and 1 with the reason on stderr otherwise.
+int gfn0_after_an_early_custom_method_lookup(const std::string& library) {
+    try {
+        const test::ScopedEnvironment variable("OEVIBE_XTB_LIBRARY", nullptr);
+        const test::ScopedEnvironment conda("CONDA_PREFIX", nullptr);
+        const test::ScopedPythonLibraryDirectory python("");
+        const test::ScopedDefaultLibraryPath<XtbEngine> default_path(
+            "/nonexistent/lib/libxtb.6.dylib");
+        EngineRegistry& registry = EngineRegistry::Instance();
+        auto custom = std::make_shared<test::FakeEngine>(
+            "fake-early-lookup",
+            std::vector<MethodCapabilities>{test::fake_capabilities("early-lookup")});
+        registry.Register(custom, true);
+        if (registry.ResolveForMethod(Method("early-lookup")) != custom) {
+            std::cerr << "the custom method did not resolve to its engine\n";
+            return 1;
+        }
+        const std::shared_ptr<Engine> xtb = registry.Find("xtb");
+        if (xtb->IsAvailable()) {
+            return LOADER_FINDS_XTB;
+        }
+        {
+            // Only a changed path reopens a failed load, so a source that now reaches the
+            // library while the path stays the same does not.
+            const test::ScopedEnvironment reachable("OEVIBE_XTB_LIBRARY", library.c_str());
+            if (xtb->IsAvailable()) {
+                std::cerr << "the failed load was retried although the path did not change\n";
+                return 1;
+            }
+        }
+
+        XtbEngine::SetLibraryPath(library);
+        CalculationOptions options = options_for(GFN0_XTB);
+        Calculation calculation(options);
+        OEChem::OEMol input = test::make_conformers("CCO");
+        const ResultSet results = calculation.Energy(input);
+        if (results.Get(0).GetStatus() != ConformerStatus::OK ||
+            results.Get(0).GetProvenance().engine != "xtb") {
+            std::cerr << "GFN0 failed: " << results.Get(0).GetMessage() << "\n";
+            return 1;
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "GFN0 after the early lookup threw: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 }  // namespace
+
+// The registry, its engines' load outcomes, and the default library path are process-wide, and
+// the tests before this one have used them, so the check runs in a re-executed child process
+// that starts from none of that.
+TEST(EngineIntegrationTest, AnEarlyCustomMethodLookupDoesNotFreezeGfn0Unavailable) {
+    const std::string library = test::xtb_library_path();
+    if (library.empty()) {
+        GTEST_SKIP() << test::XTB_SKIP_REASON;
+    }
+    const std::string previous_style = GTEST_FLAG_GET(death_test_style);
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    int status = -1;
+    // The predicate runs in this process after the child exits, so it can keep the status.
+    EXPECT_EXIT(
+        std::exit(gfn0_after_an_early_custom_method_lookup(library)),
+        [&status](int child_status) {
+            status = child_status;
+            return WIFEXITED(child_status) && (WEXITSTATUS(child_status) == 0 ||
+                                               WEXITSTATUS(child_status) == LOADER_FINDS_XTB);
+        },
+        "");
+    GTEST_FLAG_SET(death_test_style, previous_style);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == LOADER_FINDS_XTB) {
+        GTEST_SKIP() << "the system loader finds a libxtb";
+    }
+}
 
 TEST(EngineIntegrationTest, Gfn2InTheGasPhaseThroughTblite) {
     const std::string library = test::tblite_library_path();
