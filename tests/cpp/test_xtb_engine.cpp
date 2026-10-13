@@ -341,6 +341,24 @@ TEST_F(XtbEngineTest, AnInstallationWithoutTheParameterFileIsRetriedWhenTheDefau
                 WATER_ENERGY_EH * Units::HARTREE_TO_KCAL, 1e-6);
 }
 
+// A retry that again finds no library replaces the failure it had, so the reason describes the
+// path in force now. Both paths name a library that loads and is rejected, which stops the
+// search there and needs no libxtb.
+TEST(XtbEngineLoadTest, AFailedRetryReportsTheNewPath) {
+    const std::string first = test::unrelated_library_path();
+    const std::string second = test::other_unrelated_library_path();
+    const test::ScopedDefaultLibraryPath<XtbEngine> default_path(first);
+    const XtbEngine builtin;
+    ASSERT_FALSE(builtin.IsAvailable());
+    ASSERT_NE(builtin.GetUnavailableReason().find(first), std::string::npos)
+        << builtin.GetUnavailableReason();
+
+    XtbEngine::SetLibraryPath(second);
+    const std::string reason = builtin.GetUnavailableReason();
+    EXPECT_NE(reason.find(second), std::string::npos) << reason;
+    EXPECT_EQ(reason.find(first), std::string::npos) << reason;
+}
+
 TEST_F(XtbEngineTest, DeclaresGfn0AndAnUnavailableGfnFf) {
     const XtbEngine engine(library_);
     ASSERT_EQ(engine.GetMethods().size(), 2u);

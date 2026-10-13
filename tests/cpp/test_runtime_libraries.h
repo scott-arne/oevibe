@@ -50,6 +50,16 @@ inline const char* unrelated_library_path() {
 #endif
 }
 
+/// :returns: A second library with the same property, for a retry whose new path has to be
+///     told apart from the first one's in the reason.
+inline const char* other_unrelated_library_path() {
+#ifdef __APPLE__
+    return "/usr/lib/libz.1.dylib";
+#else
+    return "libm.so.6";
+#endif
+}
+
 /// Sets or unsets one environment variable for a scope and restores its previous state.
 class ScopedEnvironment {
 public:

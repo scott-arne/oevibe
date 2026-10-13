@@ -324,8 +324,9 @@ std::shared_ptr<const detail::XtbEngineState> XtbEngine::Load() const {
         std::shared_ptr<const detail::XtbEngineState> reloaded = load_xtb(explicit_path);
         attempted_path_ = explicit_path;
         // A retry that loads nothing keeps the library the engine already holds, which is
-        // still open and still the one its sessions run on.
-        if (!state_ || reloaded->library) {
+        // still open and still the one its sessions run on. With no library to keep, the
+        // retry's own outcome stands, so the reason describes the path in force now.
+        if (!state_ || !state_->library || reloaded->library) {
             state_ = std::move(reloaded);
         }
     }

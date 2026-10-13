@@ -59,9 +59,10 @@ public:
 
 private:
     /// :returns: The load outcome, computed on the first call. A library with its GFN0-xTB
-    ///     parameter file is kept for the engine's life; any other outcome is replaced only
-    ///     when the explicit path has changed since it, and only by one that has a library.
-    ///     The caller's pointer keeps its state alive across such a replacement.
+    ///     parameter file is kept for the engine's life; any other outcome is replaced when
+    ///     the explicit path has changed since it, except that a library already open is kept
+    ///     when the retry finds none. The caller's pointer keeps its state alive across such a
+    ///     replacement.
     std::shared_ptr<const detail::XtbEngineState> Load() const;
 
     std::string library_path_;
