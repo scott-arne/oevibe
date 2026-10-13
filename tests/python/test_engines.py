@@ -164,10 +164,11 @@ def test_gfn0_is_gas_phase_only(ethanol):
     ("method", "engine"), [("gfn2-xtb", "tblite"), ("gfn0-xtb", "xtb")]
 )
 def test_a_missing_library_makes_the_engine_unavailable(tmp_path, method, engine):
-    # The registry and its built-in engines are process-wide, and each engine loads its library
-    # once and keeps the outcome, as does the library directory. A child process gets its own
-    # registry, so the failed load and the changed directory cannot leak into the other tests,
-    # which need the libraries named by OEVIBE_TBLITE_LIBRARY and OEVIBE_XTB_LIBRARY.
+    # The registry and its built-in engines are process-wide, as is the library directory: an
+    # engine never replaces a library it loaded, and retries a failed load only when the path it
+    # tried has changed. A child process gets its own registry, so the failed load and the
+    # changed directory cannot leak into the other tests, which need the libraries named by
+    # OEVIBE_TBLITE_LIBRARY and OEVIBE_XTB_LIBRARY.
     conda_prefix = tmp_path / "conda"
     python_lib = tmp_path / "python-lib"
     environment = dict(os.environ)

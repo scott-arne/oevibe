@@ -95,8 +95,10 @@ std::optional<std::string> known_bad_tblite_pairing(const std::string& library_p
 }
 
 std::mutex& tblite_mutex() {
-    static std::mutex mutex;
-    return mutex;
+    // Leaked like xtb_mutex() and the engine registry, so that a session released during static
+    // destruction still finds the mutex: ~TbliteSession locks it.
+    static auto* mutex = new std::mutex();
+    return *mutex;
 }
 
 std::string bind_tblite_api(const RuntimeLibrary& library, TbliteApi& api) {

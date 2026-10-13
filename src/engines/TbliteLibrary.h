@@ -23,8 +23,11 @@ std::string tblite_version_text(int version);
 ///     pairing a GFN2-xTB single point never returns (it hangs inside dftd4).
 std::optional<std::string> known_bad_tblite_pairing(const std::string& library_path);
 
-/// Serializes every libtblite call in the process (spec 8.3). Every TbliteEngine instance shares
-/// it, because instances may load the same library.
+/// Serializes the libtblite calls OEVibe's tblite engine makes, the per-engine process-wide
+/// mutex of spec 8.3. Every TbliteEngine instance shares it, because instances may load the same
+/// library. It does not serialize the libtblite image itself: libxtb links libtblite and
+/// libdftd4, so a thread inside XtbEngine holding ``xtb_mutex()`` can enter those same images
+/// while this mutex is held.
 std::mutex& tblite_mutex();
 
 /// The libtblite C API functions OEVibe calls. tblite's handles are pointers to opaque structs,

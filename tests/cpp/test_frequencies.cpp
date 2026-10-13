@@ -377,7 +377,8 @@ TEST(FrequenciesTest, CoincidentAtomsRaiseInsteadOfReturningNaN) {
 }
 
 // The floor is on the rotational moment, not a test for exactly equal coordinates: atoms 0.01
-// Angstrom apart are as unusable as coincident ones (moment 7e-5 amu Angstrom^2).
+// Angstrom apart are as unusable as coincident ones. CO's reduced mass is 6.86 amu, so the
+// moment is 6.9e-4 amu Angstrom^2, below the 1e-3 floor but only by a factor of 1.5.
 TEST(FrequenciesTest, NearlyCoincidentAtomsRaise) {
     Diatomic co = carbon_monoxide(1200.0);
     for (int i = 0; i < 3; ++i) {

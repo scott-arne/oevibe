@@ -52,9 +52,11 @@ std::string xtb_gfn0_missing_reason(const std::string& library_path, const std::
 /// The same with ``XTBPATH`` and ``XTBHOME`` read from the process environment.
 std::string xtb_gfn0_missing_reason(const std::string& library_path);
 
-/// The process-wide mutex that serializes every libxtb call (spec 8.3). The xtb C API is not
-/// thread-safe, so every engine instance and session holds it around each call, whichever
-/// libxtb file it loaded.
+/// The process-wide mutex that serializes the libxtb calls OEVibe's xtb engine makes, the
+/// per-engine mutex of spec 8.3. The xtb C API is not thread-safe, so every engine instance and
+/// session holds it around each call, whichever libxtb file it loaded. It does not cover
+/// libxtb's own dependencies: libxtb links libtblite and libdftd4, so a thread inside
+/// TbliteEngine holding ``tblite_mutex()`` can enter those same images while this mutex is held.
 std::mutex& xtb_mutex();
 
 /// An opaque xtb C API handle (environment, molecule, calculator, or results).
