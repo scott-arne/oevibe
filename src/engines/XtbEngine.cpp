@@ -82,52 +82,24 @@ std::vector<double> to_bohr(const std::vector<double>& angstrom) {
     return bohr;
 }
 
-/// One GFN0-xTB trajectory. The environment, molecule, calculator, and results live as long as
-/// the session, and each evaluation only moves the atoms (spec 8.3).
+/// One GFN0-xTB trajectory. The environment, molecule, calculator, and results are built by the
+/// first evaluation, from the coordinates that evaluation is given, and live as long as the
+/// session; each later evaluation only moves the atoms (spec 8.3). The session never reads a
+/// conformer from the system, because a session is never shared across conformers and a result
+/// must not depend on which conformer the system lists first (spec 6.4).
 class XtbSession : public EngineSession {
 public:
     XtbSession(std::shared_ptr<const detail::XtbLibrary> library, const MolecularSystem& system,
                double accuracy, const std::string& parameter_file)
-        : library_(std::move(library)), num_atoms_(system.NumAtoms()) {
-        if (system.NumConformers() == 0) {
-            throw std::runtime_error("xtb needs a starting geometry, but the system has none");
-        }
-        const detail::XtbFunctions& xtb = library_->Functions();
-        const int natoms = static_cast<int>(num_atoms_);
-        const std::vector<int> numbers(system.GetAtomicNumbers().begin(),
-                                       system.GetAtomicNumbers().end());
-        // The first conformer only seeds the structure; every evaluation sets its own positions.
-        const std::vector<double> positions = to_bohr(system.GetConformerCoordinates(0));
-        const double charge = system.GetCharge();
-        const int unpaired = static_cast<int>(system.GetMultiplicity()) - 1;
-        // xtb_loadGFN0xTB takes a non-const char*, so it receives a private copy of the path.
-        std::vector<char> parameter_path(parameter_file.begin(), parameter_file.end());
-        parameter_path.push_back('\0');
-
-        std::lock_guard<std::mutex> lock(detail::xtb_mutex());
-        try {
-            environment_ = xtb.new_environment();
-            if (environment_ == nullptr) {
-                throw std::runtime_error("xtb_newEnvironment returned no environment");
-            }
-            xtb.set_verbosity(environment_, XTB_VERBOSITY_MUTED);
-            molecule_ = xtb.new_molecule(environment_, &natoms, numbers.data(), positions.data(),
-                                         &charge, &unpaired, nullptr, nullptr);
-            CheckLocked("xtb_newMolecule");
-            calculator_ = xtb.new_calculator();
-            results_ = xtb.new_results();
-            if (calculator_ == nullptr || results_ == nullptr) {
-                throw std::runtime_error("xtb could not allocate a calculator or results object");
-            }
-            xtb.load_gfn0(environment_, molecule_, calculator_, parameter_path.data());
-            CheckLocked("xtb_loadGFN0xTB");
-            // libxtb rejects an accuracy until a calculator is loaded (probe 2026-10-11).
-            xtb.set_accuracy(environment_, calculator_, accuracy);
-            CheckLocked("xtb_setAccuracy");
-        } catch (...) {
-            ReleaseLocked();
-            throw;
-        }
+        : library_(std::move(library)),
+          num_atoms_(system.NumAtoms()),
+          numbers_(system.GetAtomicNumbers().begin(), system.GetAtomicNumbers().end()),
+          charge_(system.GetCharge()),
+          unpaired_(static_cast<int>(system.GetMultiplicity()) - 1),
+          accuracy_(accuracy),
+          // xtb_loadGFN0xTB takes a non-const char*, so it receives a private copy of the path.
+          parameter_path_(parameter_file.begin(), parameter_file.end()) {
+        parameter_path_.push_back('\0');
     }
 
     ~XtbSession() override {
@@ -162,8 +134,12 @@ public:
         std::vector<double> occupations;
         {
             std::lock_guard<std::mutex> lock(detail::xtb_mutex());
-            xtb.update_molecule(environment_, molecule_, positions.data(), nullptr);
-            CheckLocked("xtb_updateMolecule");
+            if (!initialized_) {
+                InitializeLocked(positions);
+            } else {
+                xtb.update_molecule(environment_, molecule_, positions.data(), nullptr);
+                CheckLocked("xtb_updateMolecule");
+            }
             xtb.singlepoint(environment_, molecule_, calculator_, results_);
             CheckLocked("xtb_singlepoint");
             xtb.get_energy(environment_, results_, &energy);
@@ -229,6 +205,41 @@ public:
     }
 
 private:
+    /// Builds the libxtb objects around ``positions_bohr``; the caller holds
+    /// ``detail::xtb_mutex()``. A failure releases everything, so the next evaluation starts again
+    /// from its own coordinates.
+    ///
+    /// :raises std::runtime_error: With libxtb's message when it rejects the structure.
+    void InitializeLocked(const std::vector<double>& positions_bohr) {
+        const detail::XtbFunctions& xtb = library_->Functions();
+        const int natoms = static_cast<int>(num_atoms_);
+        try {
+            environment_ = xtb.new_environment();
+            if (environment_ == nullptr) {
+                throw std::runtime_error("xtb_newEnvironment returned no environment");
+            }
+            xtb.set_verbosity(environment_, XTB_VERBOSITY_MUTED);
+            molecule_ =
+                xtb.new_molecule(environment_, &natoms, numbers_.data(), positions_bohr.data(),
+                                 &charge_, &unpaired_, nullptr, nullptr);
+            CheckLocked("xtb_newMolecule");
+            calculator_ = xtb.new_calculator();
+            results_ = xtb.new_results();
+            if (calculator_ == nullptr || results_ == nullptr) {
+                throw std::runtime_error("xtb could not allocate a calculator or results object");
+            }
+            xtb.load_gfn0(environment_, molecule_, calculator_, parameter_path_.data());
+            CheckLocked("xtb_loadGFN0xTB");
+            // libxtb rejects an accuracy until a calculator is loaded (probe 2026-10-11).
+            xtb.set_accuracy(environment_, calculator_, accuracy_);
+            CheckLocked("xtb_setAccuracy");
+        } catch (...) {
+            ReleaseLocked();
+            throw;
+        }
+        initialized_ = true;
+    }
+
     /// Releases every handle; the caller holds ``detail::xtb_mutex()``.
     void ReleaseLocked() noexcept {
         const detail::XtbFunctions& xtb = library_->Functions();
@@ -269,7 +280,13 @@ private:
     }
 
     std::shared_ptr<const detail::XtbLibrary> library_;
-    unsigned num_atoms_ = 0;
+    unsigned num_atoms_;
+    std::vector<int> numbers_;
+    double charge_;
+    int unpaired_;
+    double accuracy_;
+    std::vector<char> parameter_path_;
+    bool initialized_ = false;  ///< Guarded by ``detail::xtb_mutex()``.
     detail::XtbHandle environment_ = nullptr;
     detail::XtbHandle molecule_ = nullptr;
     detail::XtbHandle calculator_ = nullptr;

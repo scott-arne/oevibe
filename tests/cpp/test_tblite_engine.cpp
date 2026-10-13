@@ -99,6 +99,22 @@ double energy_of(TbliteEngine& engine, const MolecularSystem& system,
     return session->Evaluate(system.GetConformerCoordinates(0), EvaluationRequest()).energy;
 }
 
+/// A system whose conformers are ``first`` and then ``second``; ``first`` also supplies the atoms.
+MolecularSystem make_two_conformers(const OEChem::OEGraphMol& first,
+                                    const std::vector<double>& second) {
+    OEChem::OEMol mol(first);
+    mol.NewConf(second.data());
+    return MolecularSystem(mol, 0, 1);
+}
+
+/// The energy of one conformer, evaluated as Calculation does: a new session for that conformer
+/// alone, fed that conformer's coordinates.
+double energy_of_conformer(TbliteEngine& engine, const MolecularSystem& system, unsigned position) {
+    return engine.CreateSession(system, settings_for(GFN2_XTB))
+        ->Evaluate(system.GetConformerCoordinates(position), EvaluationRequest())
+        .energy;
+}
+
 /// A scratch directory that is removed with the object.
 class ScratchDirectory {
 public:
@@ -411,8 +427,12 @@ TEST_F(TbliteEngineTest, AnUnknownSolventIsAnEngineErrorNamingIt) {
     const OEChem::OEGraphMol h2o = water();
     const MolecularSystem system(h2o, 0, 1);
     for (SolventModel model : {SolventModel::ALPB, SolventModel::GBSA}) {
-        try {
+        // Only tblite's database can tell that the solvent is unknown, and it is asked when the
+        // first evaluation builds the structure's solvation.
+        auto session =
             Tblite().CreateSession(system, settings_for(GFN2_XTB, Solvent("notasolvent", model)));
+        try {
+            session->Evaluate(system.GetConformerCoordinates(0), EvaluationRequest());
             FAIL() << "expected tblite to reject the solvent";
         } catch (const UnsupportedError& e) {
             FAIL() << "an unknown solvent is an engine error, not UNSUPPORTED: " << e.what();
@@ -443,6 +463,48 @@ TEST_F(TbliteEngineTest, OneSessionFollowsItsGeometry) {
     EXPECT_NEAR(at_second, fresh->Evaluate(second, EvaluationRequest()).energy, 1e-6);
 }
 
+// Spec 6.4: a session is never shared across conformers, so results do not depend on conformer
+// order. Calculation gives every conformer its own session, so a session has to start from the
+// coordinates it is asked to evaluate, never from conformer 0: here one conformer has two
+// coincident atoms, which tblite refuses to build a structure from.
+TEST_F(TbliteEngineTest, AConformersResultDoesNotDependOnItsPosition) {
+    const OEChem::OEGraphMol h2o = water();
+    std::vector<double> valid(9);
+    h2o.GetCoords(valid.data());
+    const std::vector<double> coincident = {0.0,     0.0, 0.1173, 0.0,    0.7572,
+                                            -0.4692, 0.0, 0.7572, -0.4692};
+    const OEChem::OEGraphMol coincident_molecule =
+        make_molecule({8, 1, 1}, coincident, {{0, 1}, {0, 2}});
+    const MolecularSystem valid_first = make_two_conformers(h2o, coincident);
+    const MolecularSystem invalid_first = make_two_conformers(coincident_molecule, valid);
+    ASSERT_EQ(valid_first.NumConformers(), 2u);
+    ASSERT_EQ(invalid_first.NumConformers(), 2u);
+
+    const double alone = energy_of_conformer(Tblite(), MolecularSystem(h2o, 0, 1), 0);
+    EXPECT_NEAR(alone, WATER_GFN2 * Units::HARTREE_TO_KCAL, ENERGY_TOLERANCE);
+    double valid_at_first = 0.0;
+    double valid_at_second = 0.0;
+    ASSERT_NO_THROW(valid_at_first = energy_of_conformer(Tblite(), valid_first, 0));
+    ASSERT_NO_THROW(valid_at_second = energy_of_conformer(Tblite(), invalid_first, 1));
+    EXPECT_NEAR(valid_at_first, alone, ENERGY_TOLERANCE);
+    EXPECT_NEAR(valid_at_second, alone, ENERGY_TOLERANCE);
+    EXPECT_THROW(energy_of_conformer(Tblite(), valid_first, 1), std::runtime_error);
+    EXPECT_THROW(energy_of_conformer(Tblite(), invalid_first, 0), std::runtime_error);
+}
+
+// A first evaluation that tblite rejects releases what it built, so the next evaluation builds
+// the session again from its own coordinates.
+TEST_F(TbliteEngineTest, ASessionWhoseFirstEvaluationFailedBuildsItselfAgain) {
+    const OEChem::OEGraphMol h2o = water();
+    const MolecularSystem system(h2o, 0, 1);
+    auto session = Tblite().CreateSession(system, settings_for(GFN2_XTB));
+    const std::vector<double> coincident = {0.0,     0.0, 0.1173, 0.0,    0.7572,
+                                            -0.4692, 0.0, 0.7572, -0.4692};
+    EXPECT_THROW(session->Evaluate(coincident, EvaluationRequest()), std::runtime_error);
+    EXPECT_NEAR(session->Evaluate(system.GetConformerCoordinates(0), EvaluationRequest()).energy,
+                WATER_GFN2 * Units::HARTREE_TO_KCAL, ENERGY_TOLERANCE);
+}
+
 TEST_F(TbliteEngineTest, RejectsWhatItCannotCompute) {
     const OEChem::OEGraphMol h2o = water();
     const MolecularSystem system(h2o, 0, 1);
@@ -471,12 +533,14 @@ TEST_F(TbliteEngineTest, KnownBadPairingMakesTheEngineUnavailable) {
         << engine.GetUnavailableReason();
 }
 
-// Holding the process-wide mutex must stall another thread's session creation, evaluation, and
-// destruction, which proves that each takes it.
+// Holding the process-wide mutex must stall another thread's first evaluation (which builds the
+// library objects), a later evaluation, and the destruction of a session that holds them, which
+// proves that each of the three library-touching points takes it. Creating a session calls no
+// library function, so it is not among them.
 TEST_F(TbliteEngineTest, LibraryCallsWaitForTheProcessWideMutex) {
     const OEChem::OEGraphMol h2o = water();
     const MolecularSystem system(h2o, 0, 1);
-    std::shared_ptr<EngineSession> session;
+    std::shared_ptr<EngineSession> session = Tblite().CreateSession(system, settings_for(GFN2_XTB));
     const auto expect_blocked = [](const char* what, const std::function<void()>& work) {
         SCOPED_TRACE(what);
         std::atomic<bool> done{false};
@@ -498,10 +562,11 @@ TEST_F(TbliteEngineTest, LibraryCallsWaitForTheProcessWideMutex) {
         EXPECT_TRUE(done.load());
         EXPECT_EQ(failure, "");
     };
-    expect_blocked("CreateSession",
-                   [&]() { session = Tblite().CreateSession(system, settings_for(GFN2_XTB)); });
     ASSERT_NE(session, nullptr);
-    expect_blocked("Evaluate", [&]() {
+    expect_blocked("first Evaluate", [&]() {
+        session->Evaluate(system.GetConformerCoordinates(0), EvaluationRequest());
+    });
+    expect_blocked("later Evaluate", [&]() {
         session->Evaluate(system.GetConformerCoordinates(0), EvaluationRequest());
     });
     expect_blocked("destruction", [&]() { session.reset(); });

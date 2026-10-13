@@ -68,6 +68,27 @@ Evaluation evaluate(XtbEngine& engine, const MolecularSystem& system, const Geom
         ->Evaluate(geometry.coords, request);
 }
 
+/// A system whose conformers are ``first`` and then ``second``, in that order.
+MolecularSystem make_two_conformers(const Geometry& first, const Geometry& second) {
+    OEChem::OEGraphMol graph;
+    for (unsigned z : first.numbers) {
+        graph.NewAtom(z);
+    }
+    graph.SetCoords(first.coords.data());
+    graph.SetDimension(3);
+    OEChem::OEMol mol(graph);
+    mol.NewConf(second.coords.data());
+    return MolecularSystem(mol, 0, 1);
+}
+
+/// The energy of one conformer, evaluated as Calculation does: a new session for that conformer
+/// alone, fed that conformer's coordinates.
+double evaluate_conformer(XtbEngine& engine, const MolecularSystem& system, unsigned position) {
+    return engine.CreateSession(system, gfn0_settings())
+        ->Evaluate(system.GetConformerCoordinates(position), EvaluationRequest())
+        .energy;
+}
+
 /// Fake xtb installations: ``prefix`` holds lib/ and share/xtb/param_gfn0-xtb.txt, ``home``
 /// and ``path_b`` hold the parameter file, ``path_a`` and ``bare_prefix`` hold none.
 class XtbParameterFileTest : public ::testing::Test {
@@ -367,20 +388,60 @@ TEST_F(XtbEngineTest, MalformedCoordinatesAreRejected) {
     EXPECT_THROW(session->Evaluate({0.0, 0.0, 0.0}, EvaluationRequest()), std::runtime_error);
 }
 
+// Spec 6.4: a session is never shared across conformers, so results do not depend on conformer
+// order. Calculation gives every conformer its own session, so a session has to start from the
+// coordinates it is asked to evaluate, never from conformer 0: here one conformer has two
+// coincident atoms, which libxtb refuses to build a molecule from.
+TEST_F(XtbEngineTest, AConformersResultDoesNotDependOnItsPosition) {
+    XtbEngine engine(library_);
+    const Geometry coincident = {WATER.numbers,
+                                 {0.0, 0.0, 0.1173, 0.0, 0.7572, -0.4692, 0.0, 0.7572, -0.4692}};
+    const MolecularSystem valid_first = make_two_conformers(WATER, coincident);
+    const MolecularSystem invalid_first = make_two_conformers(coincident, WATER);
+    ASSERT_EQ(valid_first.NumConformers(), 2u);
+    ASSERT_EQ(invalid_first.NumConformers(), 2u);
+
+    // OpenEye stores single precision, so compare the conformers with the same coordinates alone.
+    const double alone = evaluate_conformer(engine, make_system(WATER, 0, 1), 0);
+    EXPECT_NEAR(alone, WATER_ENERGY_EH * Units::HARTREE_TO_KCAL, 1e-3);
+    double valid_at_first = 0.0;
+    double valid_at_second = 0.0;
+    ASSERT_NO_THROW(valid_at_first = evaluate_conformer(engine, valid_first, 0));
+    ASSERT_NO_THROW(valid_at_second = evaluate_conformer(engine, invalid_first, 1));
+    EXPECT_NEAR(valid_at_first, alone, 1e-8);
+    EXPECT_NEAR(valid_at_second, alone, 1e-8);
+    EXPECT_THROW(evaluate_conformer(engine, valid_first, 1), std::runtime_error);
+    EXPECT_THROW(evaluate_conformer(engine, invalid_first, 0), std::runtime_error);
+}
+
 // libxtb refuses a structure with coincident atoms ("Could not generate molecular structure",
 // probe 2026-10-11); that must surface as a plain runtime error, which a calculation reports as
-// ENGINE_ERROR, and never as UnsupportedError.
+// ENGINE_ERROR, and never as UnsupportedError. The session builds its molecule from the first
+// evaluation's coordinates, so the error comes from that evaluation.
 TEST_F(XtbEngineTest, LibxtbErrorsBecomeRuntimeErrors) {
     XtbEngine engine(library_);
     const Geometry coincident = {{1, 1}, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+    auto session = engine.CreateSession(make_system(coincident, 0, 1), gfn0_settings());
     try {
-        engine.CreateSession(make_system(coincident, 0, 1), gfn0_settings());
+        session->Evaluate(coincident.coords, EvaluationRequest());
         FAIL() << "expected std::runtime_error";
     } catch (const UnsupportedError& e) {
         FAIL() << "libxtb errors must not be UnsupportedError: " << e.what();
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("xtb_newMolecule"), std::string::npos) << e.what();
     }
+}
+
+// A first evaluation that libxtb rejects releases what it built, so the next evaluation builds
+// the session again from its own coordinates.
+TEST_F(XtbEngineTest, ASessionWhoseFirstEvaluationFailedBuildsItselfAgain) {
+    XtbEngine engine(library_);
+    auto session = engine.CreateSession(make_system(WATER, 0, 1), gfn0_settings());
+    const std::vector<double> coincident = {0.0,     0.0, 0.1173, 0.0,    0.7572,
+                                            -0.4692, 0.0, 0.7572, -0.4692};
+    EXPECT_THROW(session->Evaluate(coincident, EvaluationRequest()), std::runtime_error);
+    EXPECT_NEAR(session->Evaluate(WATER.coords, EvaluationRequest()).energy,
+                WATER_ENERGY_EH * Units::HARTREE_TO_KCAL, 1e-6);
 }
 
 // Two threads create sessions on one engine that has not loaded libxtb yet, then evaluate

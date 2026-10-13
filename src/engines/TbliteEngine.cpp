@@ -50,21 +50,55 @@ std::vector<double> to_bohr(const std::vector<double>& angstrom) {
     return bohr;
 }
 
+/// The tblite parameter set that models ``solvent`` with the method's own fit.
+struct Solvation {
+    SolventModel model = SolventModel::AUTO;
+    int parameters = 0;
+};
+
+/// :raises OptionsError: For a solvent model tblite does not provide.
+Solvation solvation_for(const Solvent& solvent, bool gfn1) {
+    Solvation solvation;
+    // Calculation resolves AUTO; a direct caller gets the method's AUTO default, ALPB.
+    solvation.model =
+        solvent.GetModel() == SolventModel::AUTO ? SolventModel::ALPB : solvent.GetModel();
+    if (solvation.model == SolventModel::ALPB) {
+        solvation.parameters = gfn1 ? ALPB_GFN1 : ALPB_GFN2;
+    } else if (solvation.model == SolventModel::GBSA) {
+        solvation.parameters = gfn1 ? GBSA_GFN1 : GBSA_GFN2;
+    } else {
+        throw OptionsError("engine 'tblite' does not provide solvent model '" +
+                           solvent_model_name(solvation.model) + "'");
+    }
+    return solvation;
+}
+
 /// One structure, calculator, and result over a lifetime of evaluations, so each SCF starts from
 /// the previous wavefunction (spec 8.3). Every library call holds ``tblite_mutex()``.
+///
+/// The library objects are built by the first evaluation, from the coordinates that evaluation is
+/// given. The session never reads a conformer from the system, because a session is never shared
+/// across conformers and a result must not depend on which conformer the system lists first
+/// (spec 6.4). The constructor keeps only what needs no library call, and checks the settings
+/// that need none, so those errors still surface when the session is created.
 class TbliteSession : public EngineSession {
 public:
-    /// :raises std::runtime_error: With tblite's message when the library rejects the system,
-    ///     the settings, or the solvent.
+    /// :raises OptionsError: For a method or solvent model tblite does not provide.
     TbliteSession(std::shared_ptr<const detail::TbliteLibrary> library,
                   const MolecularSystem& system, const EngineSettings& settings)
-        : library_(std::move(library)), num_atoms_(system.NumAtoms()) {
-        const std::lock_guard<std::mutex> lock(detail::tblite_mutex());
-        try {
-            Initialize(system, settings);
-        } catch (...) {
-            Release();
-            throw;
+        : library_(std::move(library)),
+          num_atoms_(system.NumAtoms()),
+          numbers_(system.GetAtomicNumbers().begin(), system.GetAtomicNumbers().end()),
+          charge_(system.GetCharge()),
+          unpaired_(static_cast<int>(system.GetMultiplicity()) - 1),
+          settings_(settings),
+          gfn1_(settings.method == Method(GFN1_XTB)) {
+        if (!gfn1_ && settings.method != Method(GFN2_XTB)) {
+            throw OptionsError("engine 'tblite' does not provide method '" +
+                               settings.method.GetName() + "'");
+        }
+        if (!settings.solvent.IsGasPhase()) {
+            solvation_ = solvation_for(settings.solvent, gfn1_);
         }
     }
 
@@ -90,8 +124,12 @@ public:
         const std::vector<double> positions = to_bohr(coords_angstrom);
         Evaluation evaluation;
         const std::lock_guard<std::mutex> lock(detail::tblite_mutex());
-        api.update_structure_geometry(error_, structure_, positions.data(), nullptr);
-        CheckError("tblite_update_structure_geometry");
+        if (!initialized_) {
+            InitializeLocked(positions);
+        } else {
+            api.update_structure_geometry(error_, structure_, positions.data(), nullptr);
+            CheckError("tblite_update_structure_geometry");
+        }
         api.get_singlepoint(context_, structure_, calculator_, result_);
         CheckContext("tblite_get_singlepoint");
         double energy = 0.0;
@@ -111,7 +149,21 @@ public:
     }
 
 private:
-    void Initialize(const MolecularSystem& system, const EngineSettings& settings) {
+    /// Builds the tblite objects around ``positions``; the caller holds ``tblite_mutex()``. A
+    /// failure releases everything, so the next evaluation starts again from its own coordinates.
+    /// :raises std::runtime_error: With tblite's message when the library rejects the structure,
+    ///     the settings, or the solvent.
+    void InitializeLocked(const std::vector<double>& positions) {
+        try {
+            Initialize(positions);
+        } catch (...) {
+            Release();
+            throw;
+        }
+        initialized_ = true;
+    }
+
+    void Initialize(const std::vector<double>& positions) {
         const detail::TbliteApi& api = library_->api;
         context_ = api.new_context();
         error_ = api.new_error();
@@ -122,42 +174,30 @@ private:
         api.set_context_verbosity(context_, 0);
         CheckContext("tblite_set_context_verbosity");
 
-        const std::vector<unsigned>& atomic_numbers = system.GetAtomicNumbers();
-        const std::vector<int> numbers(atomic_numbers.begin(), atomic_numbers.end());
-        // The first evaluation moves the structure to its own coordinates; any conformer of the
-        // system is a valid starting geometry.
-        const std::vector<double> positions = to_bohr(system.GetConformerCoordinates(0));
-        const double charge = system.GetCharge();
-        const int unpaired = static_cast<int>(system.GetMultiplicity()) - 1;
-        structure_ = api.new_structure(error_, static_cast<int>(num_atoms_), numbers.data(),
-                                       positions.data(), &charge, &unpaired, nullptr, nullptr);
+        structure_ = api.new_structure(error_, static_cast<int>(num_atoms_), numbers_.data(),
+                                       positions.data(), &charge_, &unpaired_, nullptr, nullptr);
         CheckError("tblite_new_structure");
 
-        const bool gfn1 = settings.method == Method(GFN1_XTB);
-        if (!gfn1 && settings.method != Method(GFN2_XTB)) {
-            throw OptionsError("engine 'tblite' does not provide method '" +
-                               settings.method.GetName() + "'");
-        }
-        calculator_ = (gfn1 ? api.new_gfn1_calculator : api.new_gfn2_calculator)(
+        calculator_ = (gfn1_ ? api.new_gfn1_calculator : api.new_gfn2_calculator)(
             context_, structure_, nullptr);
-        CheckContext(gfn1 ? "tblite_new_gfn1_calculator" : "tblite_new_gfn2_calculator");
-        api.set_calculator_accuracy(context_, calculator_, settings.accuracy);
+        CheckContext(gfn1_ ? "tblite_new_gfn1_calculator" : "tblite_new_gfn2_calculator");
+        api.set_calculator_accuracy(context_, calculator_, settings_.accuracy);
         CheckContext("tblite_set_calculator_accuracy");
         // ValidateSettings has checked both keywords' types and bounds.
-        const auto max_iterations = settings.keywords.find("max_iterations");
-        if (max_iterations != settings.keywords.end()) {
+        const auto max_iterations = settings_.keywords.find("max_iterations");
+        if (max_iterations != settings_.keywords.end()) {
             api.set_calculator_max_iter(context_, calculator_, std::stoi(max_iterations->second));
             CheckContext("tblite_set_calculator_max_iter");
         }
-        const auto temperature = settings.keywords.find("electronic_temperature");
-        if (temperature != settings.keywords.end()) {
+        const auto temperature = settings_.keywords.find("electronic_temperature");
+        if (temperature != settings_.keywords.end()) {
             api.set_calculator_temperature(
                 context_, calculator_,
                 std::stod(temperature->second) * BOLTZMANN_HARTREE_PER_KELVIN);
             CheckContext("tblite_set_calculator_temperature");
         }
-        if (!settings.solvent.IsGasPhase()) {
-            AddSolvation(settings.solvent, gfn1);
+        if (!settings_.solvent.IsGasPhase()) {
+            AddSolvation();
         }
         result_ = api.new_result();
         if (result_ == nullptr) {
@@ -165,29 +205,19 @@ private:
         }
     }
 
-    void AddSolvation(const Solvent& solvent, bool gfn1) {
+    void AddSolvation() {
         const detail::TbliteApi& api = library_->api;
-        // Calculation resolves AUTO; a direct caller gets the method's AUTO default, ALPB.
-        const SolventModel model =
-            solvent.GetModel() == SolventModel::AUTO ? SolventModel::ALPB : solvent.GetModel();
-        int parameters = 0;
-        if (model == SolventModel::ALPB) {
-            parameters = gfn1 ? ALPB_GFN1 : ALPB_GFN2;
-        } else if (model == SolventModel::GBSA) {
-            parameters = gfn1 ? GBSA_GFN1 : GBSA_GFN2;
-        } else {
-            throw OptionsError("engine 'tblite' does not provide solvent model '" +
-                               solvent_model_name(model) + "'");
-        }
+        const Solvent& solvent = settings_.solvent;
         std::vector<char> name(solvent.GetName().begin(), solvent.GetName().end());
         name.push_back('\0');
-        void* container = api.new_alpb_solvation_solvent(error_, structure_, name.data(),
-                                                         parameters, GSOLV_REFERENCE_STATE);
+        void* container = api.new_alpb_solvation_solvent(
+            error_, structure_, name.data(), solvation_.parameters, GSOLV_REFERENCE_STATE);
         const std::string rejected = ErrorText();
         if (!rejected.empty()) {
             // tblite's message does not name the solvent, so the result would not say which one.
             throw std::runtime_error("tblite cannot model solvent '" + solvent.GetName() +
-                                     "' with " + solvent_model_name(model) + ": " + rejected);
+                                     "' with " + solvent_model_name(solvation_.model) + ": " +
+                                     rejected);
         }
         // The calculator takes ownership and clears the handle; on failure it stays ours.
         api.calculator_push_back(context_, calculator_, &container);
@@ -302,28 +332,42 @@ private:
         }
     }
 
-    /// Deletes every handle; the caller holds ``tblite_mutex()``.
+    /// Deletes every handle; the caller holds ``tblite_mutex()``. The handles are cleared here
+    /// rather than left to the library, because a failed first evaluation may be followed by
+    /// another that builds them again.
     void Release() {
         const detail::TbliteApi& api = library_->api;
         if (result_ != nullptr) {
             api.delete_result(&result_);
+            result_ = nullptr;
         }
         if (calculator_ != nullptr) {
             api.delete_calculator(&calculator_);
+            calculator_ = nullptr;
         }
         if (structure_ != nullptr) {
             api.delete_structure(&structure_);
+            structure_ = nullptr;
         }
         if (error_ != nullptr) {
             api.delete_error(&error_);
+            error_ = nullptr;
         }
         if (context_ != nullptr) {
             api.delete_context(&context_);
+            context_ = nullptr;
         }
     }
 
     std::shared_ptr<const detail::TbliteLibrary> library_;
     unsigned num_atoms_;
+    std::vector<int> numbers_;
+    double charge_;
+    int unpaired_;
+    EngineSettings settings_;
+    bool gfn1_;
+    Solvation solvation_;
+    bool initialized_ = false;  ///< Guarded by ``tblite_mutex()``.
     void* context_ = nullptr;
     void* error_ = nullptr;
     void* structure_ = nullptr;

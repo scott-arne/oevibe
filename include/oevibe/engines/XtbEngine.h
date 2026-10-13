@@ -42,9 +42,12 @@ public:
     std::vector<MethodCapabilities> GetMethods() const override;
     /// :returns: ``accuracy`` (DOUBLE, 1e-4 to 1e3) for both methods.
     std::vector<KeywordSpec> GetKeywordSpecs() const override;
+    /// The session calls libxtb only from its first ``Evaluate``, which builds the molecule from
+    /// the coordinates it is given, so a system's conformer order never decides a result (spec
+    /// 6.4). That evaluation throws ``std::runtime_error`` with libxtb's message when libxtb
+    /// rejects the structure.
     /// :raises EngineUnavailableError: When the library or the method is unavailable.
     /// :raises OptionsError: For a method the engine does not provide, or a solvent.
-    /// :raises std::runtime_error: With libxtb's message when it rejects the system.
     std::shared_ptr<EngineSession> CreateSession(const MolecularSystem& system,
                                                  const EngineSettings& settings) override;
 

@@ -36,11 +36,13 @@ public:
     std::vector<MethodCapabilities> GetMethods() const override;
     /// :returns: ``accuracy``, ``max_iterations``, and ``electronic_temperature``.
     std::vector<KeywordSpec> GetKeywordSpecs() const override;
+    /// The session calls tblite only from its first ``Evaluate``, which builds the structure from
+    /// the coordinates it is given, so a system's conformer order never decides a result (spec
+    /// 6.4). That evaluation throws ``std::runtime_error`` with tblite's own message when the
+    /// library rejects the structure or the solvent.
     /// :raises EngineUnavailableError: When the library cannot be used.
     /// :raises OptionsError: For settings that fail ``ValidateSettings`` or a solvent model
     ///     tblite does not provide.
-    /// :raises std::runtime_error: With tblite's own message when the library rejects the
-    ///     system or the solvent.
     std::shared_ptr<EngineSession> CreateSession(const MolecularSystem& system,
                                                  const EngineSettings& settings) override;
 
