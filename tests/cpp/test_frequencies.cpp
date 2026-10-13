@@ -361,4 +361,34 @@ TEST(FrequenciesTest, InvalidInputsRaise) {
     EXPECT_THROW(detail::analyze_frequencies(broken, co.x, {6, 8}), OEVibeError);
     EXPECT_THROW(detail::analyze_frequencies(co.hessian, co.x, {6, 0}), OEVibeError);
     EXPECT_THROW(detail::analyze_frequencies({}, {}, {}), OEVibeError);
+    EXPECT_THROW(detail::analyze_frequencies(co.hessian, {1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, {6, 8}),
+                 OEVibeError);
+}
+
+// With every atom at one point the inertia tensor vanishes, so no rotation vector can be
+// normalized; the analysis must say so rather than hand NaNs to the eigensolver.
+TEST(FrequenciesTest, CoincidentAtomsRaiseInsteadOfReturningNaN) {
+    const Diatomic co = carbon_monoxide(1200.0);
+    EXPECT_THROW(detail::analyze_frequencies(co.hessian, {1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, {6, 8}),
+                 OEVibeError);
+    EXPECT_THROW(detail::analyze_frequencies(std::vector<double>(81, 1.0),
+                                             std::vector<double>(9, 0.5), {1, 6, 8}),
+                 OEVibeError);
+}
+
+// The floor is on the rotational moment, not a test for exactly equal coordinates: atoms 0.01
+// Angstrom apart are as unusable as coincident ones (moment 7e-5 amu Angstrom^2).
+TEST(FrequenciesTest, NearlyCoincidentAtomsRaise) {
+    Diatomic co = carbon_monoxide(1200.0);
+    for (int i = 0; i < 3; ++i) {
+        co.x[3 + i] = co.x[i] + 0.01 * co.axis(i);
+    }
+    EXPECT_THROW(detail::analyze_frequencies(co.hessian, co.x, {6, 8}), OEVibeError);
+}
+
+// Every entry is finite, but mass weighting and symmetrizing overflow; the result must not be NaN.
+TEST(FrequenciesTest, OverflowingHessianRaisesInsteadOfReturningNaN) {
+    const Diatomic co = carbon_monoxide(1200.0);
+    EXPECT_THROW(detail::analyze_frequencies(std::vector<double>(36, 1e308), co.x, {6, 8}),
+                 OEVibeError);
 }

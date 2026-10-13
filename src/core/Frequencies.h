@@ -40,7 +40,13 @@ std::vector<double> atomic_masses(const std::vector<unsigned>& atomic_numbers);
 /// atom is not linear and has no modes.
 /// :param hessian: 9N^2 values, row-major, kcal/mol/Angstrom^2, dense order.
 /// :param x: Dense 3N coordinates in Angstrom.
-/// :raises OEVibeError: For inconsistent sizes, values that are not finite, or an unknown element.
+/// :param atomic_numbers: N atomic numbers in dense order; they select the masses.
+/// :returns: The frequencies, normal modes, imaginary-mode count, linearity, principal moments,
+///     and total mass; every vector in it is finite.
+/// :raises OEVibeError: For inconsistent sizes, values that are not finite, an unknown element, a
+///     multi-atom geometry whose atoms are all coincident or nearly so (every rotation needs a
+///     principal moment of at least ``LINEAR_MOMENT_THRESHOLD``), or an eigenproblem that fails or
+///     overflows.
 FrequencyAnalysis analyze_frequencies(const std::vector<double>& hessian,
                                       const std::vector<double>& x,
                                       const std::vector<unsigned>& atomic_numbers);

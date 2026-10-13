@@ -18,6 +18,14 @@ namespace {
 
 using RowMajorMatrix = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
+// The squared norm of the mass-weighted rotation about a principal axis equals that axis's
+// moment, so a rotation can only be normalized when its moment is clearly above zero. The floor
+// is the moment below which an axis counts as vanishing (the linear case), which makes the two
+// decisions agree: an axis is either a real rotation or the one a linear molecule loses, and a
+// geometry that would need a second vanishing axis, with every atom within a few hundredths of an
+// Angstrom of one point, has no meaningful rotations and is rejected instead.
+constexpr double MIN_ROTATION_MOMENT = LINEAR_MOMENT_THRESHOLD;  // amu Angstrom^2
+
 bool all_finite(const std::vector<double>& values) {
     return std::all_of(values.begin(), values.end(), [](double v) { return std::isfinite(v); });
 }
@@ -75,6 +83,9 @@ FrequencyAnalysis analyze_frequencies(const std::vector<double>& hessian,
             masses[atom] * (p.squaredNorm() * Eigen::Matrix3d::Identity() - p * p.transpose());
     }
     const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> principal(inertia);
+    if (principal.info() != Eigen::Success) {
+        throw OEVibeError("frequency analysis could not diagonalize the inertia tensor");
+    }
     const Eigen::Vector3d moments = principal.eigenvalues();  // ascending
     const Eigen::Matrix3d axes = principal.eigenvectors();
     analysis.total_mass = total_mass;
@@ -105,7 +116,16 @@ FrequencyAnalysis analyze_frequencies(const std::vector<double>& hessian,
             const auto atom = static_cast<std::size_t>(a);
             turn.segment<3>(3 * a) = std::sqrt(masses[atom]) * axes.col(k).cross(relative[atom]);
         }
-        rigid.push_back(turn / turn.norm());
+        const double moment = turn.squaredNorm();
+        if (!std::isfinite(moment) || moment < MIN_ROTATION_MOMENT) {
+            throw OEVibeError(
+                "frequency analysis needs a geometry that can rotate: the rotation about "
+                "principal axis " +
+                std::to_string(k) + " has moment " + std::to_string(moment) +
+                " amu Angstrom^2, below " + std::to_string(MIN_ROTATION_MOMENT) +
+                " (coincident or nearly coincident atoms)");
+        }
+        rigid.push_back(turn / std::sqrt(moment));
     }
     const auto num_rigid = static_cast<Eigen::Index>(rigid.size());
     const Eigen::Index num_modes = d - num_rigid;
@@ -135,6 +155,9 @@ FrequencyAnalysis analyze_frequencies(const std::vector<double>& hessian,
                                      inverse_sqrt_mass.asDiagonal();
     const Eigen::MatrixXd reduced = vibrational.transpose() * weighted * vibrational;
     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(reduced);
+    if (solver.info() != Eigen::Success) {
+        throw OEVibeError("frequency analysis could not diagonalize the projected Hessian");
+    }
     const Eigen::MatrixXd modes = vibrational * solver.eigenvectors();
 
     analysis.frequencies.reserve(static_cast<std::size_t>(num_modes));
@@ -151,6 +174,11 @@ FrequencyAnalysis analyze_frequencies(const std::vector<double>& hessian,
             inverse_sqrt_mass.cwiseProduct(modes.col(i)).normalized();
         analysis.normal_modes.insert(analysis.normal_modes.end(), displacement.data(),
                                      displacement.data() + d);
+    }
+    // Finite inputs can still overflow while mass weighting; downstream thermochemistry must never
+    // receive NaN or infinite frequencies.
+    if (!all_finite(analysis.frequencies) || !all_finite(analysis.normal_modes)) {
+        throw OEVibeError("frequency analysis produced values that are not finite");
     }
     return analysis;
 }
