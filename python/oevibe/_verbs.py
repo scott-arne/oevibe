@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numbers
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -275,3 +276,108 @@ def frequencies(
     thermo.SetTemperature(_checked_float("temperature", temperature))
     thermo.SetPressure(_checked_float("pressure", pressure))
     return _core.Calculation(options).Frequencies(mol, thermo)
+
+
+def _dihedral_indices(dihedral: Any) -> list[int]:
+    from openeye import oechem
+
+    if isinstance(dihedral, str | bytes):
+        raise _core.OptionsError(
+            f"each dihedral must be four atoms or atom indices, got {dihedral!r}"
+        )
+    try:
+        items = list(dihedral)
+    except TypeError:
+        raise _core.OptionsError(
+            f"each dihedral must be four atoms or atom indices, got {dihedral!r}"
+        ) from None
+    if len(items) != 4:
+        raise _core.OptionsError(
+            f"each dihedral must have exactly four atoms, got {len(items)}"
+        )
+    indices = []
+    for item in items:
+        if isinstance(item, oechem.OEAtomBase):
+            indices.append(int(item.GetIdx()))
+        elif isinstance(item, numbers.Integral) and not isinstance(item, bool):
+            indices.append(_checked_int("dihedral atom index", item, 0, _UNSIGNED_MAX))
+        else:
+            raise _core.OptionsError(
+                f"dihedral atoms must be OEAtomBase objects or atom indices, got {item!r}"
+            )
+    return indices
+
+
+def _angle_range(value: Any) -> tuple[float, float]:
+    try:
+        start, end = value
+    except (TypeError, ValueError):
+        raise _core.OptionsError(
+            f"angle_range must be a (start, end) pair in degrees, got {value!r}"
+        ) from None
+    return (
+        _checked_float("angle_range start", start),
+        _checked_float("angle_range end", end),
+    )
+
+
+def scan(
+    mol: Any,
+    dihedrals: Iterable[Any],
+    method: Any = "gfn2-xtb",
+    *,
+    step: float = 15.0,
+    angle_range: tuple[float, float] = (-180.0, 180.0),
+    max_optimizations: int | None = None,
+    solvent: Any = None,
+    engine: str | None = None,
+    preset: Any = "standard",
+    properties: Iterable[Any] = (),
+    charge: int | None = None,
+    multiplicity: int | None = None,
+    keywords: Mapping[str, Any] | None = None,
+) -> Any:
+    """Relaxed scan of one or two dihedrals by wavefront propagation.
+
+    Every conformer of ``mol`` seeds the grid point nearest its dihedral values, and each
+    grid-point optimization holds the scanned dihedrals at the grid values. The molecule's
+    coordinates and SD data are not changed; implicit hydrogens are made explicit, as for every
+    calculation. Shared parameters match :func:`energy`; a scan computes no properties, so a
+    non-empty ``properties`` raises :class:`OptionsError`. Building the options and the
+    calculation holds the GIL; only the scan releases it, after copying the scan options, so do
+    not pass the same molecule to calculations on more than one thread at a time.
+
+    :param dihedrals: One or two dihedrals, each four ``OEAtomBase`` objects or four OpenEye atom
+        indices.
+    :param step: Grid step in degrees; it must divide the range.
+    :param angle_range: ``(start, end)`` in degrees, at most 360 apart. A range of exactly 360
+        degrees gives a periodic grid from ``start + step`` to ``end``; any other includes both
+        ends.
+    :param max_optimizations: Caps the constrained optimizations; by default 20 per grid point.
+    :returns: A :class:`ScanResult`.
+    :raises OptionsError: For invalid dihedrals, scan options, or calculation options.
+    :raises InputError: When the molecule fails validation or a dihedral atom is not in it.
+    """
+    options = _calculation_options(
+        method, solvent, engine, preset, properties, charge, multiplicity, keywords
+    )
+    if isinstance(dihedrals, str | bytes):
+        raise _core.OptionsError(
+            f"dihedrals must be a list of dihedrals, got {dihedrals!r}"
+        )
+    try:
+        dihedral_list = list(dihedrals)
+    except TypeError:
+        raise _core.OptionsError(
+            f"dihedrals must be a list of dihedrals, got {dihedrals!r}"
+        ) from None
+    scan_options = _core.ScanOptions()
+    for dihedral in dihedral_list:
+        scan_options.AddDihedral(*_dihedral_indices(dihedral))
+    scan_options.SetStep(_checked_float("step", step))
+    scan_options.SetRange(*_angle_range(angle_range))
+    if max_optimizations is not None:
+        scan_options.SetMaxOptimizations(
+            _checked_int("max_optimizations", max_optimizations, 1, _UNSIGNED_MAX)
+        )
+    return _core.Calculation(options).Scan(mol, scan_options)

@@ -350,7 +350,7 @@ OE_CROSS_RUNTIME_NULLABLE_PTR_TYPEMAPS(OESystem::OEScalarGrid, _oevibe_is_oescal
 OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Expected OEReceptor object.")
 
 // ============================================================================
-// GIL: held by default, released only for Energy, Gradient, Optimize, and Frequencies
+// GIL: held by default, released only for Energy, Gradient, Optimize, Frequencies, and Scan
 // ============================================================================
 // A feature applies only to declarations parsed after it, so this block precedes every
 // wrapper-generating directive. Plan A engines are native C++ and never call back into Python,
@@ -364,6 +364,9 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 %threadallow OEVIBE::Calculation::Gradient;
 %threadallow OEVIBE::Calculation::Optimize;
 %threadallow OEVIBE::Calculation::Frequencies;
+// Scan reads its ScanOptions for the whole run, so its wrapper copies them while the GIL is still
+// held (the typemap before Calculation.h below).
+%threadallow OEVIBE::Calculation::Scan;
 
 // ============================================================================
 // STL support
@@ -533,6 +536,26 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %ignore OEVIBE::ConformerResult::SetProvenance;
 %ignore OEVIBE::ConformerResult::SetTimings;
 
+// Scan results are read-only for the same reason. GetMolecule is replaced by the Python method
+// in the %extend below. The cross-runtime typemaps convert OpenEye arguments, and the only
+// OpenEye return typemap swaps a heap OEScalarGrid pointer into a new openeye.oegrid object, so
+// an OEMol returned by value would reach Python as a proxy openeye.oechem cannot use. As for
+// MolecularSystem::CopyMolecule (spec 6.2), Python passes in a genuine openeye.oechem.OEMol.
+%ignore OEVIBE::ScanPoint::SetAngles;
+%ignore OEVIBE::ScanPoint::SetStatus;
+%ignore OEVIBE::ScanPoint::SetEnergy;
+%ignore OEVIBE::ScanPoint::SetRelativeEnergy;
+%ignore OEVIBE::ScanPoint::ClearRelativeEnergy;
+%ignore OEVIBE::ScanPoint::SetCoordinates;
+%ignore OEVIBE::ScanResult::AddDihedral;
+%ignore OEVIBE::ScanResult::AddPoint;
+%ignore OEVIBE::ScanResult::SetTruncated;
+%ignore OEVIBE::ScanResult::AddWarning;
+%ignore OEVIBE::ScanResult::SetProvenance;
+%ignore OEVIBE::ScanResult::SetMolecule;
+%ignore OEVIBE::ScanResult::Finalize;
+%ignore OEVIBE::ScanResult::GetMolecule;
+
 // A Calculation resolves its engine and settings from the options at construction, so Python
 // receives a copy of them (see the %extend below); an alias that could be edited would
 // desynchronize the calculation from the tags it writes. The %ignore is lifted again before
@@ -550,18 +573,20 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %pythonappend OEVIBE::OptimizerOptions::GetConstraints %{ val._parent = self %}
 %pythonappend OEVIBE::ThermoOptions::GetOptimizerOptions %{ val._parent = self %}
 %pythonappend OEVIBE::ScanOptions::GetOptimizerOptions %{ val._parent = self %}
+%pythonappend OEVIBE::ScanResult::GetPoint %{ val._parent = self %}
+%pythonappend OEVIBE::ScanResult::GetProvenance %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetMethod %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetSolvent %{ val._parent = self %}
 
-// Energy, Gradient, Optimize, and Frequencies release the GIL (above), so the molecule they read
-// must not be shared with another thread that is using it.
+// Energy, Gradient, Optimize, Frequencies, and Scan release the GIL (above), so the molecule they
+// read must not be shared with another thread that is using it.
 %feature("docstring") OEVIBE::Calculation
 "Runs tasks over every conformer of a molecule with one resolved engine (spec 5.6).
 
-Not thread-safe; use one per thread. Construction holds the GIL. Energy, Gradient, Optimize, and
-Frequencies release it while they evaluate; Optimize and Frequencies copy their options before
-releasing it. The same molecule must not be passed to calculations from more than one thread at
-a time."
+Not thread-safe; use one per thread. Construction holds the GIL. Energy, Gradient, Optimize,
+Frequencies, and Scan release it while they evaluate; Optimize, Frequencies, and Scan copy their
+task options before releasing it. The same molecule must not be passed to calculations from more
+than one thread at a time."
 
 // ============================================================================
 // Version
@@ -644,9 +669,24 @@ a time."
     snapshot = *reinterpret_cast< $1_ltype >(argp);
     $1 = &snapshot;
 }
+// Scan runs with the GIL released and reads its ScanOptions throughout, so it gets the same
+// private copy.
+%typemap(in) const OEVIBE::ScanOptions& options
+    (void *argp = 0, int res = 0, OEVIBE::ScanOptions snapshot) {
+    res = SWIG_ConvertPtr($input, &argp, $descriptor, 0);
+    if (!SWIG_IsOK(res)) {
+        SWIG_exception_fail(SWIG_ArgError(res), "Expected ScanOptions object.");
+    }
+    if (!argp) {
+        SWIG_exception_fail(SWIG_NullReferenceError, "Null reference.");
+    }
+    snapshot = *reinterpret_cast< $1_ltype >(argp);
+    $1 = &snapshot;
+}
 %include "oevibe/Calculation.h"
 %clear const OEVIBE::OptimizerOptions& options;
 %clear const OEVIBE::ThermoOptions& options;
+%clear const OEVIBE::ScanOptions& options;
 
 // A declaration takes its features when it is parsed, so this lifts the %ignore only for the
 // %extend below, not for the header's const-reference method parsed above.
@@ -689,6 +729,22 @@ a time."
 
     def __iter__(self):
         return (self[i] for i in range(len(self)))
+%}
+}
+
+%extend OEVIBE::ScanResult {
+%pythoncode %{
+    def GetMolecule(self):
+        """Return an ``openeye.oechem.OEMol`` with one conformer per point that has an energy.
+
+        Conformers follow grid order and carry the SD data ``ScanAngles``, ``Energy``,
+        ``RelativeEnergy``, and ``Status`` under the ``OEVibe.<method>.<solvent-tag>.`` prefix.
+        """
+        from openeye import oechem
+
+        mol = oechem.OEMol()
+        self.CopyMolecule(mol)
+        return mol
 %}
 }
 
@@ -738,4 +794,12 @@ class ConformerStatus(_enum.IntEnum):
     NOT_CONVERGED = ConformerStatus_NOT_CONVERGED
     ENGINE_ERROR = ConformerStatus_ENGINE_ERROR
     UNSUPPORTED = ConformerStatus_UNSUPPORTED
+
+
+class ScanPointStatus(_enum.IntEnum):
+    OK = ScanPointStatus_OK
+    NOT_CONVERGED = ScanPointStatus_NOT_CONVERGED
+    ENGINE_ERROR = ScanPointStatus_ENGINE_ERROR
+    UNSUPPORTED = ScanPointStatus_UNSUPPORTED
+    NOT_ATTEMPTED = ScanPointStatus_NOT_ATTEMPTED
 %}

@@ -560,7 +560,7 @@ _preload_bundled_libs()
 _load_cached_extension_if_needed()
 _check_openeye_version()
 
-from ._verbs import energy, frequencies, gradient, optimize
+from ._verbs import energy, frequencies, gradient, optimize, scan
 from .oevibe import (
     Algorithm,
     Calculation,
@@ -579,6 +579,10 @@ from .oevibe import (
     Property,
     Provenance,
     ResultSet,
+    ScanOptions,
+    ScanPoint,
+    ScanPointStatus,
+    ScanResult,
     Solvent,
     SolventModel,
     Thermochemistry,
@@ -627,6 +631,10 @@ __all__ = [
     "Property",
     "Provenance",
     "ResultSet",
+    "ScanOptions",
+    "ScanPoint",
+    "ScanPointStatus",
+    "ScanResult",
     "Solvent",
     "SolventModel",
     "ThermoOptions",
@@ -640,5 +648,6 @@ __all__ = [
     "get_python_library_directory",
     "gradient",
     "optimize",
+    "scan",
     "set_python_library_directory",
 ]

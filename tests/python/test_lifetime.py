@@ -104,6 +104,28 @@ def test_thermochemistry_view_keeps_its_result_alive(monkeypatch):
     assert result.GetThermochemistry()._parent is result
 
 
+def test_scan_point_view_keeps_its_result_alive(monkeypatch):
+    # Reading a view after its result is deleted passes with or without the link, because freed
+    # memory is not reliably overwritten, and a result's points cannot be built from Python. A
+    # stand-in for the C++ call lets the wrapper run, so this checks deterministically that it
+    # links the view to the result it points into.
+    stand_in = oevibe.ScanPoint()
+    monkeypatch.setattr(
+        oevibe.oevibe._oevibe,
+        "ScanResult_GetPoint",
+        lambda result, index: stand_in,
+    )
+    scan = oevibe.ScanResult()
+
+    assert scan.GetPoint(0)._parent is scan
+
+
+def test_scan_provenance_view_keeps_its_result_alive():
+    scan = oevibe.ScanResult()
+
+    assert scan.GetProvenance()._parent is scan
+
+
 def test_thermochemistry_vectors_are_copies():
     # A vector member returned as a view would be mutable from Python and would dangle once the
     # struct is freed.
