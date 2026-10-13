@@ -1,8 +1,11 @@
 #include "oevibe/Options.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 
+#include "core/ScanGrid.h"
 #include "oevibe/Error.h"
 
 namespace OEVIBE {
@@ -215,6 +218,40 @@ void OptimizerOptions::Validate() const {
     }
 }
 
+// ThermoOptions
+
+double ThermoOptions::GetTemperature() const { return temperature_; }
+void ThermoOptions::SetTemperature(double kelvin) {
+    require_positive(kelvin, "Temperature");
+    temperature_ = kelvin;
+}
+double ThermoOptions::GetPressure() const { return pressure_; }
+void ThermoOptions::SetPressure(double atm) {
+    require_positive(atm, "Pressure");
+    pressure_ = atm;
+}
+double ThermoOptions::GetQuasiRRHOCutoff() const { return quasi_rrho_cutoff_; }
+void ThermoOptions::SetQuasiRRHOCutoff(double cm) {
+    require_positive(cm, "QuasiRRHOCutoff");
+    quasi_rrho_cutoff_ = cm;
+}
+unsigned ThermoOptions::GetSymmetryNumber() const { return symmetry_number_; }
+void ThermoOptions::SetSymmetryNumber(unsigned n) {
+    require(n >= 1, "SymmetryNumber must be at least 1");
+    symmetry_number_ = n;
+}
+bool ThermoOptions::GetOptimizeFirst() const { return optimize_first_; }
+void ThermoOptions::SetOptimizeFirst(bool optimize) { optimize_first_ = optimize; }
+const OptimizerOptions& ThermoOptions::GetOptimizerOptions() const { return optimizer_; }
+void ThermoOptions::SetOptimizerOptions(const OptimizerOptions& options) { optimizer_ = options; }
+
+void ThermoOptions::Validate() const {
+    optimizer_.Validate();
+    require(optimizer_.GetConstraints().IsEmpty(),
+            "frequencies need an unconstrained stationary point, so the optimizer options must "
+            "not freeze atoms or hold constraints or restraints");
+}
+
 ResolvedOptimizerSettings resolve_optimizer_settings(const OptimizerOptions& options, Preset preset,
                                                      unsigned num_atoms, bool force_field_method) {
     options.Validate();
@@ -245,6 +282,106 @@ ResolvedOptimizerSettings resolve_optimizer_settings(const OptimizerOptions& opt
     require(resolved.initial_trust_radius <= resolved.max_trust_radius,
             "the resolved initial trust radius exceeds the resolved maximum trust radius");
     return resolved;
+}
+
+// ScanOptions
+
+namespace {
+
+bool same_dihedral(const std::vector<unsigned>& atoms, const std::vector<unsigned>& dihedral) {
+    return atoms.size() == 4 && (std::equal(atoms.begin(), atoms.end(), dihedral.begin()) ||
+                                 std::equal(atoms.begin(), atoms.end(), dihedral.rbegin()));
+}
+
+std::string dihedral_text(const std::vector<unsigned>& dihedral) {
+    return std::to_string(dihedral[0]) + "-" + std::to_string(dihedral[1]) + "-" +
+           std::to_string(dihedral[2]) + "-" + std::to_string(dihedral[3]);
+}
+
+}  // namespace
+
+void ScanOptions::AddDihedral(unsigned a, unsigned b, unsigned c, unsigned d) {
+    const std::vector<unsigned> dihedral = {a, b, c, d};
+    for (std::size_t i = 0; i < dihedral.size(); ++i) {
+        for (std::size_t j = i + 1; j < dihedral.size(); ++j) {
+            require(dihedral[i] != dihedral[j],
+                    "scanned dihedral atoms must be distinct, got " + dihedral_text(dihedral));
+        }
+    }
+    for (const std::vector<unsigned>& existing : dihedrals_) {
+        require(!same_dihedral(existing, dihedral),
+                "dihedral " + dihedral_text(dihedral) + " is already scanned");
+    }
+    require(dihedrals_.size() < 2, "a scan has at most two dihedrals");
+    dihedrals_.push_back(dihedral);
+}
+unsigned ScanOptions::GetNumDihedrals() const { return static_cast<unsigned>(dihedrals_.size()); }
+std::vector<unsigned> ScanOptions::GetDihedral(unsigned index) const {
+    require(index < dihedrals_.size(), "dihedral index " + std::to_string(index) +
+                                           " is out of range for " +
+                                           std::to_string(dihedrals_.size()) + " dihedrals");
+    return dihedrals_[index];
+}
+void ScanOptions::ClearDihedrals() { dihedrals_.clear(); }
+double ScanOptions::GetStep() const { return step_; }
+void ScanOptions::SetStep(double degrees) {
+    require_positive(degrees, "Step");
+    step_ = degrees;
+}
+double ScanOptions::GetRangeStart() const { return range_start_; }
+double ScanOptions::GetRangeEnd() const { return range_end_; }
+void ScanOptions::SetRange(double start, double end) {
+    require(std::isfinite(start) && std::isfinite(end), "Range ends must be finite");
+    range_start_ = start;
+    range_end_ = end;
+}
+bool ScanOptions::HasMaxOptimizations() const { return max_optimizations_.has_value(); }
+unsigned ScanOptions::GetMaxOptimizations() const {
+    if (!max_optimizations_.has_value()) {
+        throw OptionsError("MaxOptimizations is not set");
+    }
+    return *max_optimizations_;
+}
+void ScanOptions::SetMaxOptimizations(unsigned count) {
+    require(count >= 1, "MaxOptimizations must be at least 1");
+    max_optimizations_ = count;
+}
+void ScanOptions::ClearMaxOptimizations() { max_optimizations_.reset(); }
+const OptimizerOptions& ScanOptions::GetOptimizerOptions() const { return optimizer_; }
+void ScanOptions::SetOptimizerOptions(const OptimizerOptions& options) { optimizer_ = options; }
+
+void ScanOptions::Validate() const {
+    require(!dihedrals_.empty(), "a scan needs at least one dihedral");
+    // Every dihedral shares the axis, so the grid holds its size to the power of their number;
+    // dividing first keeps the product from overflowing before it is compared.
+    const std::size_t axis_points =
+        detail::build_scan_axis(range_start_, range_end_, step_).values.size();
+    std::size_t grid_points = 1;
+    for (std::size_t k = 0; k < dihedrals_.size(); ++k) {
+        require(axis_points <= detail::MAX_SCAN_GRID_POINTS / grid_points,
+                "the scan grid would exceed " + std::to_string(detail::MAX_SCAN_GRID_POINTS) +
+                    " points; use a larger step or a smaller range");
+        grid_points *= axis_points;
+    }
+    optimizer_.Validate();
+    require(optimizer_.GetAlgorithm() != Algorithm::LBFGS,
+            "LBFGS does not support exact constraints, and a scan constrains its dihedrals; use "
+            "ANC_RFO or AUTO");
+    const ConstraintSet& constraints = optimizer_.GetConstraints();
+    for (const std::vector<unsigned>& dihedral : dihedrals_) {
+        for (const Constraint& constraint : constraints.GetConstraints()) {
+            require(!(constraint.kind == ConstraintKind::DIHEDRAL &&
+                      same_dihedral(constraint.atoms, dihedral)),
+                    "the optimizer options already constrain scanned dihedral " +
+                        dihedral_text(dihedral));
+        }
+        for (const Restraint& restraint : constraints.GetRestraints()) {
+            require(!(restraint.kind == RestraintKind::DIHEDRAL &&
+                      same_dihedral(restraint.atoms, dihedral)),
+                    "the optimizer options already restrain scanned dihedral " +
+                        dihedral_text(dihedral));
+        }
+    }
 }
 
 }  // namespace OEVIBE

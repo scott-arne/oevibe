@@ -4,6 +4,8 @@
 #include <cmath>
 #include <limits>
 
+#include "core/Thermochemistry.h"
+#include "core/WriteBack.h"
 #include "oevibe/Error.h"
 #include "oevibe/Units.h"
 
@@ -147,6 +149,61 @@ void ConformerResult::SetBondOrders(const std::vector<BondOrder>& orders) {
     }
     bond_orders_ = stored;
 }
+bool ConformerResult::HasHessian() const { return hessian_.has_value(); }
+std::vector<double> ConformerResult::GetHessian() const {
+    return require_value(hessian_, "Hessian");
+}
+void ConformerResult::SetHessian(const std::vector<double>& hessian) {
+    const auto dim =
+        static_cast<std::size_t>(std::llround(std::sqrt(static_cast<double>(hessian.size()))));
+    if (hessian.empty() || dim * dim != hessian.size() || dim % 3 != 0) {
+        throw OEVibeError("a Hessian needs (3N)^2 values, got " + std::to_string(hessian.size()));
+    }
+    hessian_ = hessian;
+}
+bool ConformerResult::HasFrequencies() const { return frequencies_.has_value(); }
+std::vector<double> ConformerResult::GetFrequencies() const {
+    return require_value(frequencies_, "frequencies");
+}
+std::vector<double> ConformerResult::GetNormalModes() const {
+    require_value(frequencies_, "normal modes");
+    return normal_modes_;
+}
+unsigned ConformerResult::GetImaginaryModeCount() const {
+    require_value(frequencies_, "imaginary-mode count");
+    return imaginary_count_;
+}
+void ConformerResult::SetFrequencies(const std::vector<double>& frequencies,
+                                     const std::vector<double>& normal_modes,
+                                     unsigned imaginary_count) {
+    const bool shaped = frequencies.empty()
+                            ? normal_modes.empty()
+                            : normal_modes.size() % frequencies.size() == 0 &&
+                                  (normal_modes.size() / frequencies.size()) % 3 == 0 &&
+                                  !normal_modes.empty();
+    if (!shaped) {
+        throw OEVibeError("normal modes must hold one row of 3N values per frequency; got " +
+                          std::to_string(normal_modes.size()) + " values for " +
+                          std::to_string(frequencies.size()) + " frequencies");
+    }
+    const auto negative = static_cast<unsigned>(
+        std::count_if(frequencies.begin(), frequencies.end(), [](double f) { return f < 0.0; }));
+    if (imaginary_count != negative) {
+        throw OEVibeError("the imaginary-mode count " + std::to_string(imaginary_count) +
+                          " differs from the " + std::to_string(negative) +
+                          " negative frequencies");
+    }
+    frequencies_ = frequencies;
+    normal_modes_ = normal_modes;
+    imaginary_count_ = imaginary_count;
+}
+bool ConformerResult::HasThermochemistry() const { return thermochemistry_.has_value(); }
+const Thermochemistry& ConformerResult::GetThermochemistry() const {
+    return require_value(thermochemistry_, "thermochemistry");
+}
+void ConformerResult::SetThermochemistry(const Thermochemistry& thermochemistry) {
+    thermochemistry_ = thermochemistry;
+}
 bool ConformerResult::HasOptimizationStats() const { return optimization_stats_.has_value(); }
 const OptimizationStats& ConformerResult::GetOptimizationStats() const {
     return require_value(optimization_stats_, "optimization statistics");
@@ -236,19 +293,39 @@ std::map<unsigned, double> ResultSet::GetBoltzmannWeights(double temperature) co
         throw OEVibeError("temperature must be finite and greater than 0 K");
     }
     RequireComparable();
-    std::map<unsigned, double> weights;
-    if (!HasLowest()) {
-        return weights;
-    }
-    const double minimum = GetLowest().GetEnergy();
-    const double rt = Units::GAS_CONSTANT_KCAL * temperature;
-    double total = 0.0;
+    std::vector<const ConformerResult*> ok;
     for (const ConformerResult& result : results_) {
         if (result.GetStatus() == ConformerStatus::OK && result.HasEnergy()) {
-            const double weight = std::exp(-(result.GetEnergy() - minimum) / rt);
-            weights[result.GetConformerIndex()] = weight;
-            total += weight;
+            ok.push_back(&result);
         }
+    }
+    const auto with_thermochemistry = static_cast<std::size_t>(
+        std::count_if(ok.begin(), ok.end(),
+                      [](const ConformerResult* result) { return result->HasThermochemistry(); }));
+    if (with_thermochemistry != 0 && with_thermochemistry != ok.size()) {
+        throw OEVibeError("cannot weight a mix of conformers with and without thermochemistry (" +
+                          std::to_string(with_thermochemistry) + " of " +
+                          std::to_string(ok.size()) + " OK conformers have it)");
+    }
+    std::map<unsigned, double> weights;
+    if (ok.empty()) {
+        return weights;
+    }
+    // X_i of spec 5.7 in kcal/mol: free energies at this temperature, or electronic energies.
+    std::vector<double> values;
+    for (const ConformerResult* result : ok) {
+        values.push_back(with_thermochemistry == 0 ? result->GetEnergy()
+                                                   : detail::recompute_thermochemistry(
+                                                         result->GetThermochemistry(), temperature)
+                                                         .free_energy);
+    }
+    const double minimum = *std::min_element(values.begin(), values.end());
+    const double rt = Units::GAS_CONSTANT_KCAL * temperature;
+    double total = 0.0;
+    for (std::size_t k = 0; k < ok.size(); ++k) {
+        const double weight = std::exp(-(values[k] - minimum) / rt);
+        weights[ok[k]->GetConformerIndex()] = weight;
+        total += weight;
     }
     for (auto& [index, weight] : weights) {
         weight /= total;
@@ -274,6 +351,142 @@ void ResultSet::Finalize() {
 void ResultSet::AddWarningToAll(const std::string& warning) {
     for (ConformerResult& result : results_) {
         result.AddWarning(warning);
+    }
+}
+
+std::string scan_point_status_name(ScanPointStatus status) {
+    switch (status) {
+        case ScanPointStatus::OK:
+            return "OK";
+        case ScanPointStatus::NOT_CONVERGED:
+            return "NOT_CONVERGED";
+        case ScanPointStatus::ENGINE_ERROR:
+            return "ENGINE_ERROR";
+        case ScanPointStatus::UNSUPPORTED:
+            return "UNSUPPORTED";
+        case ScanPointStatus::NOT_ATTEMPTED:
+            return "NOT_ATTEMPTED";
+    }
+    return "ENGINE_ERROR";
+}
+
+std::vector<double> ScanPoint::GetAngles() const { return angles_; }
+void ScanPoint::SetAngles(const std::vector<double>& angles) { angles_ = angles; }
+ScanPointStatus ScanPoint::GetStatus() const { return status_; }
+const std::string& ScanPoint::GetMessage() const { return message_; }
+void ScanPoint::SetStatus(ScanPointStatus status, const std::string& message) {
+    status_ = status;
+    message_ = message;
+}
+bool ScanPoint::HasEnergy() const { return energy_.has_value(); }
+double ScanPoint::GetEnergy() const { return require_value(energy_, "energy"); }
+void ScanPoint::SetEnergy(double energy) { energy_ = energy; }
+bool ScanPoint::HasRelativeEnergy() const { return relative_energy_.has_value(); }
+double ScanPoint::GetRelativeEnergy() const {
+    return require_value(relative_energy_, "relative energy");
+}
+void ScanPoint::SetRelativeEnergy(double energy) { relative_energy_ = energy; }
+void ScanPoint::ClearRelativeEnergy() { relative_energy_.reset(); }
+bool ScanPoint::HasCoordinates() const { return coordinates_.has_value(); }
+std::vector<double> ScanPoint::GetCoordinates() const {
+    return require_value(coordinates_, "coordinates");
+}
+void ScanPoint::SetCoordinates(const std::vector<double>& coordinates) {
+    coordinates_ = coordinates;
+}
+
+unsigned ScanResult::GetNumDihedrals() const { return static_cast<unsigned>(dihedrals_.size()); }
+std::vector<unsigned> ScanResult::GetDihedral(unsigned index) const {
+    if (index >= dihedrals_.size()) {
+        throw OEVibeError("dihedral index " + std::to_string(index) + " is out of range");
+    }
+    return dihedrals_[index];
+}
+std::size_t ScanResult::GetNumPoints() const { return points_.size(); }
+const ScanPoint& ScanResult::GetPoint(std::size_t index) const {
+    if (index >= points_.size()) {
+        throw OEVibeError("scan point index " + std::to_string(index) + " is out of range");
+    }
+    return points_[index];
+}
+bool ScanResult::IsTruncated() const { return truncated_; }
+std::vector<std::string> ScanResult::GetWarnings() const { return warnings_; }
+const Provenance& ScanResult::GetProvenance() const { return provenance_; }
+
+OEChem::OEMol ScanResult::GetMolecule() const {
+    OEChem::OEMol mol;
+    CopyMolecule(mol);
+    return mol;
+}
+
+void ScanResult::CopyMolecule(OEChem::OEMCMolBase& out) const {
+    out.Clear();
+    // The atom map ties each graph atom to its copy, whatever indices ``out`` hands out.
+    std::vector<OEChem::OEAtomBase*> copies(graph_.GetMaxAtomIdx(), nullptr);
+    OEChem::OECopyMol(out, graph_, copies.data());
+    out.DeleteConfs();
+    std::vector<double> coords(3 * out.GetMaxAtomIdx(), 0.0);
+    for (const ScanPoint& point : points_) {
+        if (!point.HasEnergy() || !point.HasCoordinates()) {
+            continue;
+        }
+        const std::vector<double> scanned = point.GetCoordinates();
+        for (OESystem::OEIter<OEChem::OEAtomBase> atom = graph_.GetAtoms(); atom; ++atom) {
+            const std::size_t source = 3 * static_cast<std::size_t>(oe_index_of_[atom->GetIdx()]);
+            const std::size_t target =
+                3 * static_cast<std::size_t>(copies[atom->GetIdx()]->GetIdx());
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                coords[target + axis] = scanned.at(source + axis);
+            }
+        }
+        OEChem::OEConfBase* conf = out.NewConf(coords.data());
+        std::string angles;
+        for (const double angle : point.GetAngles()) {
+            angles += (angles.empty() ? "" : ",") + detail::format_value(angle);
+        }
+        OEChem::OESetSDData(*conf, tag_prefix_ + "ScanAngles", angles);
+        OEChem::OESetSDData(*conf, tag_prefix_ + "Energy", detail::format_value(point.GetEnergy()));
+        if (point.HasRelativeEnergy()) {
+            OEChem::OESetSDData(*conf, tag_prefix_ + "RelativeEnergy",
+                                detail::format_value(point.GetRelativeEnergy()));
+        }
+        OEChem::OESetSDData(*conf, tag_prefix_ + "Status",
+                            scan_point_status_name(point.GetStatus()));
+    }
+}
+
+void ScanResult::AddDihedral(const std::vector<unsigned>& atoms) { dihedrals_.push_back(atoms); }
+void ScanResult::AddPoint(ScanPoint point) { points_.push_back(std::move(point)); }
+void ScanResult::SetTruncated(bool truncated) { truncated_ = truncated; }
+void ScanResult::AddWarning(const std::string& warning) { warnings_.push_back(warning); }
+void ScanResult::SetProvenance(const Provenance& provenance) { provenance_ = provenance; }
+
+void ScanResult::SetMolecule(const OEChem::OEMolBase& mol, const std::string& tag_prefix) {
+    graph_.Clear();
+    std::vector<OEChem::OEAtomBase*> copies(mol.GetMaxAtomIdx(), nullptr);
+    OEChem::OECopyMol(graph_, mol, copies.data());
+    oe_index_of_.assign(graph_.GetMaxAtomIdx(), 0);
+    for (OESystem::OEIter<OEChem::OEAtomBase> atom = mol.GetAtoms(); atom; ++atom) {
+        oe_index_of_[copies[atom->GetIdx()]->GetIdx()] = atom->GetIdx();
+    }
+    tag_prefix_ = tag_prefix;
+}
+
+void ScanResult::Finalize() {
+    bool any = false;
+    double minimum = 0.0;
+    for (const ScanPoint& point : points_) {
+        if (point.HasEnergy() && (!any || point.GetEnergy() < minimum)) {
+            minimum = point.GetEnergy();
+            any = true;
+        }
+    }
+    for (ScanPoint& point : points_) {
+        if (point.HasEnergy()) {
+            point.SetRelativeEnergy(point.GetEnergy() - minimum);
+        } else {
+            point.ClearRelativeEnergy();
+        }
     }
 }
 

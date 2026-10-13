@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sys
+import sysconfig
 import warnings
 from importlib import metadata
 from pathlib import Path
@@ -559,7 +560,7 @@ _preload_bundled_libs()
 _load_cached_extension_if_needed()
 _check_openeye_version()
 
-from ._verbs import energy, gradient, optimize
+from ._verbs import energy, frequencies, gradient, optimize, scan
 from .oevibe import (
     Algorithm,
     Calculation,
@@ -578,11 +579,39 @@ from .oevibe import (
     Property,
     Provenance,
     ResultSet,
+    ScanOptions,
+    ScanPoint,
+    ScanPointStatus,
+    ScanResult,
     Solvent,
     SolventModel,
+    Thermochemistry,
+    ThermoOptions,
     Timings,
     UnsupportedError,
+    get_python_library_directory,
+    set_python_library_directory,
 )
+
+
+def _python_library_directory() -> str:
+    """Return the interpreter's library directory, where conda installs libtblite and libxtb.
+
+    ``LIBDIR`` is the ``lib`` directory of the interpreter's own installation, which in a conda
+    or micromamba environment is ``<prefix>/lib``. An interpreter that does not record it falls
+    back to ``<sys.prefix>/lib``.
+
+    :returns: The directory the runtime-loaded engines search after ``$CONDA_PREFIX/lib``.
+    """
+    libdir = sysconfig.get_config_var("LIBDIR")
+    if isinstance(libdir, str) and libdir:
+        return libdir
+    return os.path.join(sys.prefix, "lib")
+
+
+# The engines search for libtblite and libxtb only when a calculation first needs one, and
+# nothing above reaches an engine, so the directory is in place before any search (spec 8.3).
+set_python_library_directory(_python_library_directory())
 
 __all__ = [
     "Algorithm",
@@ -602,13 +631,23 @@ __all__ = [
     "Property",
     "Provenance",
     "ResultSet",
+    "ScanOptions",
+    "ScanPoint",
+    "ScanPointStatus",
+    "ScanResult",
     "Solvent",
     "SolventModel",
+    "ThermoOptions",
+    "Thermochemistry",
     "Timings",
     "UnsupportedError",
     "__version__",
     "__version_info__",
     "energy",
+    "frequencies",
+    "get_python_library_directory",
     "gradient",
     "optimize",
+    "scan",
+    "set_python_library_directory",
 ]

@@ -1,18 +1,29 @@
 #include "oevibe/Calculation.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 #include "core/ConstraintMath.h"
+#include "core/Frequencies.h"
+#include "core/Geometry.h"
+#include "core/Hessian.h"
 #include "core/InputPrep.h"
 #include "core/Optimizer.h"
+#include "core/ScanGrid.h"
 #include "core/Sha256.h"
+#include "core/Thermochemistry.h"
+#include "core/Wavefront.h"
 #include "core/WriteBack.h"
 #include "oevibe/EngineRegistry.h"
 #include "oevibe/Error.h"
+#include "oevibe/Units.h"
 
 namespace OEVIBE {
 
@@ -181,6 +192,68 @@ void apply_evaluation(ConformerResult& result, const Evaluation& evaluation,
     }
 }
 
+/// Evaluates ``x`` and writes what the engine returned into the result, so that every task
+/// records an evaluation the same way and rejects a malformed one with the same message.
+/// :param keep_energy_on_failure: Whether a malformed evaluation still records its energy. A
+///     task whose whole computation is this evaluation has computed that single point, so spec
+///     7.5 keeps the energy; only the energy is trusted, and the rest of the evaluation is
+///     dropped. A task that evaluates after an optimization already holds that geometry's
+///     energy, so it keeps nothing of the malformed evaluation.
+/// :raises std::runtime_error: When the evaluation is malformed.
+void evaluate_into(ConformerResult& result, EngineSession& session, const std::vector<double>& x,
+                   const EvaluationRequest& request, const MolecularSystem& system,
+                   bool keep_energy_on_failure) {
+    const Evaluation evaluation = session.Evaluate(x, request);
+    const std::string problem = validate_evaluation(evaluation, request, system.NumAtoms());
+    if (!problem.empty()) {
+        if (keep_energy_on_failure && std::isfinite(evaluation.energy)) {
+            result.SetEnergy(evaluation.energy);
+        }
+        throw std::runtime_error("engine returned a malformed Evaluation: " + problem);
+    }
+    apply_evaluation(result, evaluation, request, system);
+}
+
+/// Spec 7.5: an engine failure keeps the values computed before it. The caller rethrows, so the
+/// conformer still ends ENGINE_ERROR, and write-back skips it: the molecule keeps its input
+/// coordinates whatever geometry is recorded here.
+void keep_partial_optimization(ConformerResult& result, const detail::OptimizationFailure& failure,
+                               const MolecularSystem& system) {
+    if (failure.HasPartialOutcome()) {
+        const detail::OptimizationOutcome& partial = failure.GetPartialOutcome();
+        result.SetEnergy(partial.engine_energy);
+        result.SetCoordinates(system.ToOELayout(partial.x));
+        result.SetOptimizationStats(partial.stats);
+    } else if (failure.HasStartEnergy()) {
+        result.SetEnergy(failure.GetStartEnergy());
+    }
+}
+
+/// Records the resolved optimizer settings in a task's provenance, so that the keys and their
+/// encodings cannot drift between the tasks that optimize. ``resolved`` is hashed into the
+/// options digest, so the set of keys is part of each task's contract.
+/// :param constraints: The caller's constraint set, whose three keys are written only when it is
+///     given. Frequencies passes nothing, because ``ThermoOptions::Validate`` forbids constraints
+///     and recording three always-empty keys would move its digest. A scan passes the caller's
+///     set, not the set its grid points augment with the scanned dihedrals, whose targets differ
+///     per point and are already recorded under ``scan.*``.
+void add_optimizer_options(std::map<std::string, std::string>& resolved,
+                           const ResolvedOptimizerSettings& settings,
+                           const ConstraintSet* constraints) {
+    resolved["optimizer.algorithm"] = algorithm_name(settings.algorithm);
+    resolved["optimizer.max_iterations"] = std::to_string(settings.max_iterations);
+    resolved["optimizer.energy_change"] = detail::format_value(settings.energy_change);
+    resolved["optimizer.gradient_norm"] = detail::format_value(settings.gradient_norm);
+    resolved["optimizer.initial_trust_radius"] =
+        detail::format_value(settings.initial_trust_radius);
+    resolved["optimizer.max_trust_radius"] = detail::format_value(settings.max_trust_radius);
+    if (constraints != nullptr) {
+        resolved["optimizer.frozen_atoms"] = encode_indices(constraints->GetFrozenAtoms());
+        resolved["optimizer.constraints"] = encode_constraints(constraints->GetConstraints());
+        resolved["optimizer.restraints"] = encode_restraints(constraints->GetRestraints());
+    }
+}
+
 }  // namespace
 
 struct Calculation::CallState {
@@ -317,40 +390,22 @@ ConformerResult Calculation::NewResult(const CallState& state, unsigned position
     return result;
 }
 
-ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
-    const Clock::time_point call_start = Clock::now();
-    CallState state = Prepare(mol);
-    const double setup_seconds = seconds_since(call_start);
+ResultSet Calculation::RunConformers(OEChem::OEMolBase& mol, const CallState& state,
+                                     const std::map<std::string, std::string>& resolved,
+                                     Clock::time_point call_start, double setup_seconds,
+                                     bool write_coordinates, const ConformerBody& body) {
     const MolecularSystem& system = *state.system;
-    const std::map<std::string, std::string> resolved =
-        CallResolvedOptions(state, gradient ? "gradient" : "energy");
-    EvaluationRequest request;
-    request.gradient = gradient;
-    request.properties = settings_.properties;
-
     ResultSet results;
     for (unsigned position = 0; position < system.NumConformers(); ++position) {
         ConformerResult result = NewResult(state, position, resolved);
+        // Spec 7.5: an UNSUPPORTED conformer keeps no values, whatever the body set before the
+        // engine reported the system unsupported, so that case restores this copy.
+        const ConformerResult initial = result;
         const Clock::time_point start = Clock::now();
         try {
-            std::shared_ptr<EngineSession> session =
-                create_session(*engine_, engine_name_, system, settings_);
-            const Evaluation evaluation =
-                session->Evaluate(system.GetConformerCoordinates(position), request);
-            const std::string problem = validate_evaluation(evaluation, request, system.NumAtoms());
-            if (problem.empty()) {
-                apply_evaluation(result, evaluation, request, system);
-                result.SetStatus(ConformerStatus::OK, "");
-            } else {
-                // Spec 7.5: a failed conformer keeps the values computed before the failure.
-                // Only the energy is trusted; the rest of a malformed evaluation is dropped.
-                if (std::isfinite(evaluation.energy)) {
-                    result.SetEnergy(evaluation.energy);
-                }
-                result.SetStatus(ConformerStatus::ENGINE_ERROR,
-                                 "engine returned a malformed Evaluation: " + problem);
-            }
+            body(result, position);
         } catch (const UnsupportedError& e) {
+            result = initial;
             result.SetStatus(ConformerStatus::UNSUPPORTED, e.what());
         } catch (const std::exception& e) {
             result.SetStatus(ConformerStatus::ENGINE_ERROR, e.what());
@@ -363,8 +418,33 @@ ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
         results.Add(std::move(result));
     }
     results.Finalize();
-    detail::write_back(mol, system, results, options_, settings_.solvent.GetTag(), false);
+    detail::write_back(mol, system, results, options_, settings_.solvent.GetTag(),
+                       write_coordinates);
     return results;
+}
+
+ResultSet Calculation::RunSinglePoints(OEChem::OEMolBase& mol, bool gradient) {
+    const Clock::time_point call_start = Clock::now();
+    CallState state = Prepare(mol);
+    const double setup_seconds = seconds_since(call_start);
+    const MolecularSystem& system = *state.system;
+    const std::map<std::string, std::string> resolved =
+        CallResolvedOptions(state, gradient ? "gradient" : "energy");
+    EvaluationRequest request;
+    request.gradient = gradient;
+    request.properties = settings_.properties;
+
+    return RunConformers(mol, state, resolved, call_start, setup_seconds, false,
+                         [&](ConformerResult& result, unsigned position) {
+                             std::shared_ptr<EngineSession> session =
+                                 create_session(*engine_, engine_name_, system, settings_);
+                             // This evaluation is the whole calculation, so a malformed one still
+                             // keeps its energy (spec 7.5).
+                             evaluate_into(result, *session,
+                                           system.GetConformerCoordinates(position), request,
+                                           system, true);
+                             result.SetStatus(ConformerStatus::OK, "");
+                         });
 }
 
 ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& options) {
@@ -384,23 +464,11 @@ ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& 
 
     std::map<std::string, std::string> resolved = CallResolvedOptions(state, "optimize");
     const ConstraintSet& constraints = options.GetConstraints();
-    resolved["optimizer.algorithm"] = algorithm_name(resolved_settings.algorithm);
-    resolved["optimizer.max_iterations"] = std::to_string(resolved_settings.max_iterations);
-    resolved["optimizer.energy_change"] = detail::format_value(resolved_settings.energy_change);
-    resolved["optimizer.gradient_norm"] = detail::format_value(resolved_settings.gradient_norm);
-    resolved["optimizer.initial_trust_radius"] =
-        detail::format_value(resolved_settings.initial_trust_radius);
-    resolved["optimizer.max_trust_radius"] =
-        detail::format_value(resolved_settings.max_trust_radius);
-    resolved["optimizer.frozen_atoms"] = encode_indices(constraints.GetFrozenAtoms());
-    resolved["optimizer.constraints"] = encode_constraints(constraints.GetConstraints());
-    resolved["optimizer.restraints"] = encode_restraints(constraints.GetRestraints());
+    add_optimizer_options(resolved, resolved_settings, &constraints);
 
-    ResultSet results;
-    for (unsigned position = 0; position < system.NumConformers(); ++position) {
-        ConformerResult result = NewResult(state, position, resolved);
-        const Clock::time_point start = Clock::now();
-        try {
+    return RunConformers(
+        mol, state, resolved, call_start, setup_seconds, true,
+        [&](ConformerResult& result, unsigned position) {
             std::shared_ptr<EngineSession> session =
                 create_session(*engine_, engine_name_, system, settings_);
             const std::vector<double>& x0 = system.GetConformerCoordinates(position);
@@ -409,55 +477,357 @@ ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& 
             problem.atomic_numbers = system.GetAtomicNumbers();
             problem.constraints = detail::resolve_constraint_set(constraints, system, x0);
             problem.settings = resolved_settings;
-            const detail::OptimizationOutcome outcome = detail::run_optimization(*session, problem);
+            detail::OptimizationOutcome outcome;
+            try {
+                outcome = detail::run_optimization(*session, problem);
+            } catch (const detail::OptimizationFailure& e) {
+                keep_partial_optimization(result, e, system);
+                throw;
+            }
             result.SetEnergy(outcome.engine_energy);
             result.SetCoordinates(system.ToOELayout(outcome.x));
             result.SetOptimizationStats(outcome.stats);
-            bool properties_ok = true;
             if (settings_.properties != 0) {
                 EvaluationRequest request;
                 request.properties = settings_.properties;
-                const Evaluation evaluation = session->Evaluate(outcome.x, request);
-                const std::string problem_text =
-                    validate_evaluation(evaluation, request, system.NumAtoms());
-                if (problem_text.empty()) {
-                    apply_evaluation(result, evaluation, request, system);
-                } else {
-                    properties_ok = false;
-                    result.SetStatus(ConformerStatus::ENGINE_ERROR,
-                                     "engine returned a malformed Evaluation: " + problem_text);
-                }
+                // The optimized geometry's energy is already recorded, so a malformed property
+                // evaluation adds nothing.
+                evaluate_into(result, *session, outcome.x, request, system, false);
             }
-            if (properties_ok) {
-                result.SetStatus(
-                    outcome.converged ? ConformerStatus::OK : ConformerStatus::NOT_CONVERGED,
-                    outcome.converged ? "" : outcome.message);
-            }
-        } catch (const detail::OptimizationFailure& e) {
-            // Spec 7.5: an engine failure keeps the values computed before it. Write-back skips
-            // ENGINE_ERROR conformers, so the molecule keeps its input coordinates.
-            if (e.HasPartialOutcome()) {
-                const detail::OptimizationOutcome& partial = e.GetPartialOutcome();
-                result.SetEnergy(partial.engine_energy);
-                result.SetCoordinates(system.ToOELayout(partial.x));
-                result.SetOptimizationStats(partial.stats);
-            }
-            result.SetStatus(ConformerStatus::ENGINE_ERROR, e.what());
-        } catch (const UnsupportedError& e) {
-            result.SetStatus(ConformerStatus::UNSUPPORTED, e.what());
-        } catch (const std::exception& e) {
-            result.SetStatus(ConformerStatus::ENGINE_ERROR, e.what());
+            result.SetStatus(
+                outcome.converged ? ConformerStatus::OK : ConformerStatus::NOT_CONVERGED,
+                outcome.converged ? "" : outcome.message);
+        });
+}
+
+namespace {
+
+/// The stages of ``Calculation::Frequencies`` in order (spec 7.5).
+const char* const FREQUENCY_STAGES[] = {"optimization", "Hessian", "analysis"};
+
+/// Gives the conformer the stopping stage's status, with a message naming the stage, and records
+/// the later stages it skips as a warning (spec 7.5, 10).
+void stop_frequencies(ConformerResult& result, ConformerStatus status, const std::string& stage,
+                      const std::string& reason) {
+    result.SetStatus(status, stage + " stage: " + reason);
+    std::string skipped;
+    bool later = false;
+    for (const char* name : FREQUENCY_STAGES) {
+        if (later) {
+            skipped += (skipped.empty() ? "" : ", ") + std::string(name);
         }
-        Timings timings;
-        timings.setup = setup_seconds;
-        timings.compute = seconds_since(start);
-        timings.total = seconds_since(call_start);
-        result.SetTimings(timings);
-        results.Add(std::move(result));
+        later = later || stage == name;
     }
-    results.Finalize();
-    detail::write_back(mol, system, results, options_, settings_.solvent.GetTag(), true);
-    return results;
+    if (!skipped.empty()) {
+        result.AddWarning("the " + stage +
+                          " stage stopped, so these stages were skipped: " + skipped);
+    }
+}
+
+/// Runs one stage of ``Calculation::Frequencies``. An exception stops the conformer there: the
+/// values of completed stages stay (spec 7.5), an ENGINE_ERROR also keeps what the failed stage
+/// computed before failing, and an UNSUPPORTED stage keeps nothing of its own, as in single-stage
+/// tasks.
+/// :returns: Whether the stage completed.
+bool run_frequency_stage(ConformerResult& result, const std::string& stage,
+                         const std::function<void()>& work) {
+    const ConformerResult before = result;
+    try {
+        work();
+        return true;
+    } catch (const UnsupportedError& e) {
+        result = before;
+        stop_frequencies(result, ConformerStatus::UNSUPPORTED, stage, e.what());
+    } catch (const std::exception& e) {
+        stop_frequencies(result, ConformerStatus::ENGINE_ERROR, stage, e.what());
+    }
+    return false;
+}
+
+std::string imaginary_mode_warning(const detail::FrequencyAnalysis& analysis) {
+    const unsigned count = analysis.imaginary_count;
+    return std::to_string(count) + (count == 1 ? " imaginary mode" : " imaginary modes") +
+           " (lowest " + detail::format_value(analysis.frequencies.front()) +
+           " cm^-1): the geometry is not a minimum, and imaginary modes are left out of the ZPE "
+           "and thermal corrections";
+}
+
+}  // namespace
+
+ResultSet Calculation::Frequencies(OEChem::OEMolBase& mol, const ThermoOptions& options) {
+    const Clock::time_point call_start = Clock::now();
+    // Every option check runs before Prepare, which may add hydrogens to the caller's molecule.
+    // Resolving validates the optimizer options; its atom count only sets the default iteration
+    // limit, so the settings are resolved again for the prepared system below.
+    options.Validate();
+    const OptimizerOptions& optimizer = options.GetOptimizerOptions();
+    resolve_optimizer_settings(optimizer, settings_.preset, mol.NumAtoms(),
+                               capabilities_.force_field);
+    CallState state = Prepare(mol);
+    const MolecularSystem& system = *state.system;
+    const ResolvedOptimizerSettings resolved_settings = resolve_optimizer_settings(
+        optimizer, settings_.preset, system.NumAtoms(), capabilities_.force_field);
+    const bool optimize_first = options.GetOptimizeFirst();
+    // Spec 7.2: the engine's analytic Hessian when the method declares one.
+    const bool analytic = capabilities_.analytic_hessian;
+    const double step = preset_values(settings_.preset).fd_step;
+    const double setup_seconds = seconds_since(call_start);
+
+    std::map<std::string, std::string> resolved = CallResolvedOptions(state, "frequencies");
+    resolved["thermo.temperature"] = detail::format_value(options.GetTemperature());
+    resolved["thermo.pressure"] = detail::format_value(options.GetPressure());
+    resolved["thermo.quasi_rrho_cutoff"] = detail::format_value(options.GetQuasiRRHOCutoff());
+    resolved["thermo.symmetry_number"] = std::to_string(options.GetSymmetryNumber());
+    resolved["thermo.optimize_first"] = optimize_first ? "true" : "false";
+    resolved["hessian"] = analytic ? "analytic" : "finite_difference";
+    if (!analytic) {
+        resolved["hessian.step"] = detail::format_value(step);
+    }
+    // The optimizer settings change the results only when the optimization runs, and a
+    // ThermoOptions can hold no constraints, so the constraint keys stay out.
+    if (optimize_first) {
+        add_optimizer_options(resolved, resolved_settings, nullptr);
+    }
+
+    const ConformerBody body = [&](ConformerResult& result, unsigned position) {
+        // One session serves the optimization and every Hessian displacement (spec 6.4).
+        std::shared_ptr<EngineSession> session;
+        std::vector<double> x = system.GetConformerCoordinates(position);
+        if (optimize_first) {
+            std::string not_converged;
+            const bool completed = run_frequency_stage(result, "optimization", [&] {
+                session = create_session(*engine_, engine_name_, system, settings_);
+                detail::OptimizationProblem problem;
+                problem.x0 = x;
+                problem.atomic_numbers = system.GetAtomicNumbers();
+                problem.settings = resolved_settings;
+                detail::OptimizationOutcome outcome;
+                try {
+                    outcome = detail::run_optimization(*session, problem);
+                } catch (const detail::OptimizationFailure& e) {
+                    keep_partial_optimization(result, e, system);
+                    throw;
+                }
+                result.SetEnergy(outcome.engine_energy);
+                result.SetCoordinates(system.ToOELayout(outcome.x));
+                result.SetOptimizationStats(outcome.stats);
+                x = outcome.x;
+                if (!outcome.converged) {
+                    not_converged = outcome.message;
+                }
+            });
+            if (!completed) {
+                return;
+            }
+            if (!not_converged.empty()) {
+                stop_frequencies(result, ConformerStatus::NOT_CONVERGED, "optimization",
+                                 not_converged);
+                return;
+            }
+        }
+        std::vector<double> hessian;
+        const bool completed = run_frequency_stage(result, "Hessian", [&] {
+            if (!session) {
+                session = create_session(*engine_, engine_name_, system, settings_);
+            }
+            // Without an optimization the energy at the analyzed geometry is still unknown, and
+            // requested properties always come from that geometry.
+            if (!optimize_first || settings_.properties != 0) {
+                EvaluationRequest request;
+                request.properties = settings_.properties;
+                // The Hessian is still missing, so the stage has produced nothing a malformed
+                // evaluation could add to.
+                evaluate_into(result, *session, x, request, system, false);
+            }
+            hessian = detail::compute_hessian(*session, x, analytic, step);
+            result.SetHessian(hessian);
+        });
+        if (!completed) {
+            return;
+        }
+        run_frequency_stage(result, "analysis", [&] {
+            const detail::FrequencyAnalysis analysis =
+                detail::analyze_frequencies(hessian, x, system.GetAtomicNumbers());
+            result.SetFrequencies(analysis.frequencies, analysis.normal_modes,
+                                  analysis.imaginary_count);
+            result.SetThermochemistry(detail::compute_thermochemistry(
+                result.GetEnergy(), analysis.frequencies, analysis.principal_moments,
+                analysis.total_mass, options.GetSymmetryNumber(), analysis.linear,
+                system.GetMultiplicity(), options.GetTemperature(), options.GetPressure(),
+                options.GetQuasiRRHOCutoff()));
+            // Spec 7.3: imaginary modes are a warning; the status stays OK.
+            if (analysis.imaginary_count > 0) {
+                result.AddWarning(imaginary_mode_warning(analysis));
+            }
+            result.SetStatus(ConformerStatus::OK, "");
+        });
+    };
+    return RunConformers(mol, state, resolved, call_start, setup_seconds, optimize_first, body);
+}
+
+ScanResult Calculation::Scan(OEChem::OEMolBase& mol, const ScanOptions& options) {
+    // Every check that can reject the call runs before Prepare, which may add hydrogens to the
+    // caller's molecule. Adding hydrogens appends atoms without renumbering, so every atom
+    // checked here stays valid.
+    options.Validate();
+    if (settings_.properties != 0) {
+        throw OptionsError("scans do not compute properties; requested: " +
+                           property_names(settings_.properties));
+    }
+    const OptimizerOptions& optimizer = options.GetOptimizerOptions();
+    // At each grid point the scanned dihedrals join the caller's terms as exact constraints.
+    // These placeholder targets only serve the atom check and the algorithm choice, which
+    // depend on which terms exist, not on their targets.
+    ConstraintSet with_dihedrals = optimizer.GetConstraints();
+    for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+        const std::vector<unsigned> atoms = options.GetDihedral(k);
+        with_dihedrals.AddDihedral(atoms[0], atoms[1], atoms[2], atoms[3], 0.0);
+    }
+    OptimizerOptions constrained = optimizer;
+    constrained.SetConstraints(with_dihedrals);
+    resolve_optimizer_settings(constrained, settings_.preset, mol.NumAtoms(),
+                               capabilities_.force_field);
+    detail::check_constraint_atoms(with_dihedrals, mol);
+    CallState state = Prepare(mol);
+    const MolecularSystem& system = *state.system;
+    const ResolvedOptimizerSettings resolved_settings = resolve_optimizer_settings(
+        constrained, settings_.preset, system.NumAtoms(), capabilities_.force_field);
+    const detail::ScanGrid grid = detail::build_scan_grid(options);
+    // Spec 7.4: by default, 20 optimizations per grid point.
+    const std::size_t default_cap = std::min<std::size_t>(
+        detail::SCAN_OPTIMIZATIONS_PER_POINT * grid.Size(), std::numeric_limits<unsigned>::max());
+    const unsigned max_optimizations = options.HasMaxOptimizations()
+                                           ? options.GetMaxOptimizations()
+                                           : static_cast<unsigned>(default_cap);
+
+    std::vector<std::array<unsigned, 4>> dense_dihedrals;
+    for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+        const std::vector<unsigned> atoms = options.GetDihedral(k);
+        dense_dihedrals.push_back({system.GetDenseIndex(atoms[0]), system.GetDenseIndex(atoms[1]),
+                                   system.GetDenseIndex(atoms[2]), system.GetDenseIndex(atoms[3])});
+    }
+    // Spec 7.4: each input conformer, in order, seeds the point nearest its dihedral values.
+    std::vector<std::pair<std::size_t, std::vector<double>>> seeds;
+    for (unsigned position = 0; position < system.NumConformers(); ++position) {
+        const std::vector<double>& x = system.GetConformerCoordinates(position);
+        std::vector<double> angles;
+        for (const std::array<unsigned, 4>& atoms : dense_dihedrals) {
+            angles.push_back(
+                detail::dihedral(x.data(), atoms[0], atoms[1], atoms[2], atoms[3], nullptr) *
+                Units::RADIANS_TO_DEGREES);
+        }
+        seeds.emplace_back(grid.Nearest(angles), x);
+    }
+
+    // Spec 6.6 holds a constraint or restraint without a target at its starting value, and a
+    // position restraint at its starting position. A scan's optimizations start from many
+    // geometries, so those values come from the first input conformer for every grid point;
+    // taking them from each start would let them drift as the wavefront moves.
+    const std::vector<double>& reference_x = system.GetConformerCoordinates(0);
+    const detail::OptimizeAtPoint optimize = [&](std::size_t point,
+                                                 const std::vector<double>& start_x) {
+        detail::ScanAttempt attempt;
+        try {
+            ConstraintSet constraints = optimizer.GetConstraints();
+            const std::vector<double> angles = grid.Angles(point);
+            for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+                const std::vector<unsigned> atoms = options.GetDihedral(k);
+                constraints.AddDihedral(atoms[0], atoms[1], atoms[2], atoms[3], angles[k]);
+            }
+            // Spec 6.4: a fresh session for every grid-point optimization.
+            std::shared_ptr<EngineSession> session =
+                create_session(*engine_, engine_name_, system, settings_);
+            detail::OptimizationProblem problem;
+            problem.x0 = start_x;
+            problem.atomic_numbers = system.GetAtomicNumbers();
+            problem.constraints = detail::resolve_constraint_set(constraints, system, reference_x);
+            problem.settings = resolved_settings;
+            const detail::OptimizationOutcome outcome = detail::run_optimization(*session, problem);
+            attempt.has_energy = true;
+            attempt.energy = outcome.engine_energy;
+            attempt.converged = outcome.converged;
+            attempt.x = outcome.x;
+            attempt.message = outcome.converged ? "" : outcome.message;
+        } catch (const UnsupportedError& e) {
+            attempt = detail::ScanAttempt();
+            attempt.unsupported = true;
+            attempt.message = e.what();
+        } catch (const std::exception& e) {
+            // An OptimizationFailure carries the last iterate the optimizer accepted, but that
+            // geometry need not satisfy the grid constraints, so a failed attempt keeps no energy
+            // and no geometry however far the optimizer got. This is the only place that can
+            // enforce it: the wavefront ranks every attempt that reports an energy.
+            attempt = detail::ScanAttempt();
+            attempt.has_energy = false;
+            attempt.message = e.what();
+        }
+        return attempt;
+    };
+    const detail::WavefrontResult wavefront =
+        detail::run_wavefront(grid, seeds, max_optimizations, optimize);
+
+    std::map<std::string, std::string> resolved = CallResolvedOptions(state, "scan");
+    // The caller's constraint set, not the dihedral-augmented one: the scanned dihedrals hold a
+    // different target at every grid point, and scan.dihedrals already records them.
+    const ConstraintSet& constraints = optimizer.GetConstraints();
+    add_optimizer_options(resolved, resolved_settings, &constraints);
+    std::string dihedrals;
+    for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+        dihedrals += (k == 0 ? "" : ";") + encode_indices(options.GetDihedral(k));
+    }
+    resolved["scan.dihedrals"] = dihedrals;
+    resolved["scan.step"] = detail::format_value(options.GetStep());
+    resolved["scan.range_start"] = detail::format_value(options.GetRangeStart());
+    resolved["scan.range_end"] = detail::format_value(options.GetRangeEnd());
+    resolved["scan.max_optimizations"] = std::to_string(max_optimizations);
+
+    // NewResult assembles the provenance and the call's warnings exactly as every other task
+    // records them; a scan has no per-conformer results, so it borrows one.
+    const ConformerResult call = NewResult(state, 0, resolved);
+    ScanResult result;
+    result.SetProvenance(call.GetProvenance());
+    for (const std::string& warning : call.GetWarnings()) {
+        result.AddWarning(warning);
+    }
+    for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+        result.AddDihedral(options.GetDihedral(k));
+    }
+    result.SetMolecule(
+        mol, "OEVibe." + settings_.method.GetName() + "." + settings_.solvent.GetTag() + ".");
+    std::size_t without_energy = 0;
+    for (std::size_t index = 0; index < grid.Size(); ++index) {
+        const detail::WavefrontPoint& visited = wavefront.points[index];
+        ScanPoint point;
+        point.SetAngles(grid.Angles(index));
+        // Spec 7.5 scan-point statuses.
+        if (visited.has_best) {
+            point.SetEnergy(visited.best.energy);
+            point.SetCoordinates(system.ToOELayout(visited.best.x));
+            point.SetStatus(
+                visited.best.converged ? ScanPointStatus::OK : ScanPointStatus::NOT_CONVERGED,
+                visited.best.message);
+        } else if (visited.attempts == 0) {
+            ++without_energy;
+            point.SetStatus(ScanPointStatus::NOT_ATTEMPTED,
+                            wavefront.truncated ? "the optimization cap was reached first"
+                                                : "propagation never reached this point");
+        } else {
+            ++without_energy;
+            point.SetStatus(visited.any_unsupported ? ScanPointStatus::UNSUPPORTED
+                                                    : ScanPointStatus::ENGINE_ERROR,
+                            visited.last_message);
+        }
+        result.AddPoint(std::move(point));
+    }
+    if (wavefront.truncated) {
+        result.SetTruncated(true);
+        result.AddWarning("the scan stopped at its cap of " + std::to_string(max_optimizations) +
+                          " optimizations before propagation finished; " +
+                          std::to_string(without_energy) + " of " + std::to_string(grid.Size()) +
+                          " grid points have no energy");
+    }
+    result.Finalize();
+    return result;
 }
 
 }  // namespace OEVIBE

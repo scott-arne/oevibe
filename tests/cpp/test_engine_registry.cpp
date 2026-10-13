@@ -91,10 +91,20 @@ TEST(EngineRegistryTest, AmbiguousOrMissingMethodsAreOptionsErrors) {
                  OptionsError);
 }
 
-// Plan B registers tblite; until then a built-in GFN method has no engine.
-TEST(EngineRegistryTest, BuiltinMethodWithoutItsEngineIsUnavailable) {
-    EXPECT_THROW(EngineRegistry::Instance().ResolveForMethod(Method(GFN2_XTB)),
-                 EngineUnavailableError);
+// Finding and routing to the built-in tblite and xtb engines reads only the names cached at
+// registration, so it works whether or not their libraries can be found.
+TEST(EngineRegistryTest, BuiltinGfnEnginesAreRegisteredAndRouted) {
+    EngineRegistry& registry = EngineRegistry::Instance();
+    const std::shared_ptr<Engine> tblite = registry.Find("tblite");
+    const std::shared_ptr<Engine> xtb = registry.Find("xtb");
+    ASSERT_NE(tblite, nullptr);
+    ASSERT_NE(xtb, nullptr);
+    EXPECT_EQ(tblite->GetName(), "tblite");
+    EXPECT_EQ(xtb->GetName(), "xtb");
+    EXPECT_EQ(registry.ResolveForMethod(Method(GFN2_XTB)), tblite);
+    EXPECT_EQ(registry.ResolveForMethod(Method(GFN1_XTB)), tblite);
+    EXPECT_EQ(registry.ResolveForMethod(Method(GFN0_XTB)), xtb);
+    EXPECT_EQ(registry.ResolveForMethod(Method(GFN_FF)), xtb);
 }
 
 // Registration, lookup, and listing race from several threads; ThreadSanitizer checks the

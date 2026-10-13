@@ -1,0 +1,76 @@
+#ifndef OEVIBE_ENGINES_XTBENGINE_H
+#define OEVIBE_ENGINES_XTBENGINE_H
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "oevibe/Engine.h"
+
+namespace OEVIBE {
+
+namespace detail {
+struct XtbEngineState;
+}  // namespace detail
+
+/// GFN0-xTB through libxtb's C API 1.0, loaded at runtime with ``dlopen`` (spec 8.3, 8.5).
+///
+/// ``gfn-ff`` is declared but unavailable: C API 1.0 keeps GFN-FF topology files in the process
+/// working directory, which OEVibe never changes. The library loads on first use rather than
+/// at construction, so the Python package can pass its library directory before discovery runs.
+/// A load that can run GFN0-xTB, which needs the library and its parameter file, is kept for
+/// the engine's life. An outcome short of that is kept only while the path it used stays the
+/// same: when the explicit path (the constructor's, else ``SetLibraryPath``'s) changes, the
+/// next call tries again, and a retry that loads nothing keeps the library already open. One
+/// process-wide mutex serializes every libxtb call, because the C API is not thread-safe.
+class XtbEngine : public Engine {
+public:
+    /// :param library_path: Overrides discovery for this instance; empty uses SetLibraryPath's
+    ///     value and then spec 8.3 discovery. The library loads lazily on first use.
+    explicit XtbEngine(std::string library_path = "");
+    /// Default explicit path for instances built without one (the registry's built-in). An
+    /// instance reads it whenever it cannot yet run GFN0-xTB, so setting it after an early
+    /// query that found no library, or one without a parameter file, lets the next call retry;
+    /// it never moves an instance that has loaded a complete installation.
+    static void SetLibraryPath(const std::string& path);
+    /// :returns: ``xtb``; never loads the library.
+    std::string GetName() const override;
+    /// :returns: ``C API 1.0.0``, since C API 1.0 reports no xtb release, or "" when the
+    ///     engine is unavailable.
+    std::string GetVersion() const override;
+    bool IsAvailable() const override;
+    /// :returns: Every library candidate tried and why it failed, or the rejected C API version
+    ///     or missing entry points; "" when available.
+    std::string GetUnavailableReason() const override;
+    /// :returns: ``gfn0-xtb``, available when its parameter file is found, and ``gfn-ff``,
+    ///     never available.
+    std::vector<MethodCapabilities> GetMethods() const override;
+    /// :returns: ``accuracy`` (DOUBLE, 1e-4 to 1e3) for both methods.
+    std::vector<KeywordSpec> GetKeywordSpecs() const override;
+    /// The session calls libxtb only from its first ``Evaluate``, which builds the molecule from
+    /// the coordinates it is given, so a system's conformer order never decides a result (spec
+    /// 6.4). That evaluation throws ``std::runtime_error`` with libxtb's message when libxtb
+    /// rejects the structure.
+    /// :raises EngineUnavailableError: When the library or the method is unavailable.
+    /// :raises OptionsError: For a method the engine does not provide, or a solvent.
+    std::shared_ptr<EngineSession> CreateSession(const MolecularSystem& system,
+                                                 const EngineSettings& settings) override;
+
+private:
+    /// :returns: The load outcome, computed on the first call. A library with its GFN0-xTB
+    ///     parameter file is kept for the engine's life; any other outcome is replaced when
+    ///     the explicit path has changed since it, except that a library already open is kept
+    ///     when the retry finds none. The caller's pointer keeps its state alive across such a
+    ///     replacement.
+    std::shared_ptr<const detail::XtbEngineState> Load() const;
+
+    std::string library_path_;
+    mutable std::mutex load_mutex_;
+    mutable std::shared_ptr<const detail::XtbEngineState> state_;
+    mutable std::string attempted_path_;  ///< The explicit path ``state_`` was loaded with.
+};
+
+}  // namespace OEVIBE
+
+#endif  // OEVIBE_ENGINES_XTBENGINE_H

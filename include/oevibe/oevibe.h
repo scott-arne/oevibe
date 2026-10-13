@@ -21,5 +21,8 @@
 #include "oevibe/Solvent.h"
 #include "oevibe/Units.h"
 #include "oevibe/engines/OEFFEngine.h"
+#include "oevibe/engines/RuntimeLibraries.h"
+#include "oevibe/engines/TbliteEngine.h"
+#include "oevibe/engines/XtbEngine.h"
 
 #endif  // OEVIBE_H

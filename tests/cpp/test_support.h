@@ -109,7 +109,15 @@ inline std::vector<double> perturbed(std::vector<double> x, double amplitude) {
     return x;
 }
 
-enum class FakeMode { HARMONIC, THROW_UNSUPPORTED, THROW_RUNTIME, MALFORMED_GRADIENT };
+/// UNSUPPORTED_PROPERTIES evaluates energies and gradients normally but throws
+/// ``UnsupportedError`` from any evaluation that requests properties.
+enum class FakeMode {
+    HARMONIC,
+    THROW_UNSUPPORTED,
+    THROW_RUNTIME,
+    MALFORMED_GRADIENT,
+    UNSUPPORTED_PROPERTIES
+};
 
 /// Session of ``FakeEngine``: spring network around conformer 0, plus fixed properties.
 class FakeSession : public EngineSession {
@@ -127,6 +135,9 @@ public:
         const bool healthy = evaluations_++ < healthy_evaluations_;
         if (mode_ == FakeMode::THROW_RUNTIME && !healthy) {
             throw std::runtime_error("fake engine failure");
+        }
+        if (mode_ == FakeMode::UNSUPPORTED_PROPERTIES && request.properties != 0) {
+            throw UnsupportedError("fake engine cannot compute properties for this system");
         }
         Evaluation evaluation;
         evaluation.energy = spring_energy(reference_, coords, force_constant_,

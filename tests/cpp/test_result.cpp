@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 
+#include "core/Thermochemistry.h"
 #include "oevibe/Error.h"
 #include "oevibe/Result.h"
 #include "oevibe/Units.h"
@@ -178,4 +179,117 @@ TEST(ResultSetTest, MixedSolventModelsCannotBeCompared) {
     results.Add(result1);
 
     EXPECT_THROW(results.GetLowest(), OEVibeError);
+}
+
+TEST(ConformerResultTest, FrequencyValuesStartAbsent) {
+    const ConformerResult result;
+    EXPECT_FALSE(result.HasHessian());
+    EXPECT_FALSE(result.HasFrequencies());
+    EXPECT_FALSE(result.HasThermochemistry());
+    EXPECT_THROW(result.GetHessian(), OEVibeError);
+    EXPECT_THROW(result.GetFrequencies(), OEVibeError);
+    EXPECT_THROW(result.GetNormalModes(), OEVibeError);
+    EXPECT_THROW(result.GetImaginaryModeCount(), OEVibeError);
+    EXPECT_THROW(result.GetThermochemistry(), OEVibeError);
+}
+
+TEST(ConformerResultTest, FrequencyValuesRoundTrip) {
+    ConformerResult result;
+    const std::vector<double> hessian(36, 0.5);  // two atoms
+    result.SetHessian(hessian);
+    EXPECT_EQ(result.GetHessian(), hessian);
+    const std::vector<double> modes = {1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0};
+    result.SetFrequencies({-40.0, 1200.0}, modes, 1);
+    EXPECT_EQ(result.GetFrequencies(), (std::vector<double>{-40.0, 1200.0}));
+    EXPECT_EQ(result.GetNormalModes(), modes);
+    EXPECT_EQ(result.GetImaginaryModeCount(), 1u);
+    Thermochemistry thermo;
+    thermo.zpe = 1.7;
+    thermo.frequencies = {-40.0, 1200.0};
+    result.SetThermochemistry(thermo);
+    EXPECT_DOUBLE_EQ(result.GetThermochemistry().zpe, 1.7);
+    EXPECT_EQ(result.GetThermochemistry().frequencies, thermo.frequencies);
+}
+
+TEST(ConformerResultTest, FrequencySettersRejectInconsistentShapes) {
+    ConformerResult result;
+    EXPECT_THROW(result.SetHessian({}), OEVibeError);
+    EXPECT_THROW(result.SetHessian(std::vector<double>(10, 0.0)), OEVibeError);
+    EXPECT_THROW(result.SetHessian(std::vector<double>(16, 0.0)), OEVibeError);  // 4 x 4
+    EXPECT_THROW(result.SetFrequencies({100.0, 200.0}, std::vector<double>(7, 0.0), 0),
+                 OEVibeError);
+    EXPECT_THROW(result.SetFrequencies({100.0, 200.0}, std::vector<double>(8, 0.0), 0),
+                 OEVibeError);  // rows of 4
+    EXPECT_THROW(result.SetFrequencies({100.0}, {}, 0), OEVibeError);
+    EXPECT_THROW(result.SetFrequencies({-100.0, 200.0}, std::vector<double>(12, 0.0), 0),
+                 OEVibeError);
+    EXPECT_THROW(result.SetFrequencies({100.0, 200.0}, std::vector<double>(12, 0.0), 1),
+                 OEVibeError);
+    EXPECT_FALSE(result.HasHessian());
+    EXPECT_FALSE(result.HasFrequencies());
+    result.SetFrequencies({}, {}, 0);  // a single atom has no modes
+    EXPECT_TRUE(result.GetFrequencies().empty());
+}
+
+namespace {
+
+ConformerResult thermo_result(unsigned index, double energy,
+                              const std::vector<double>& frequencies) {
+    ConformerResult result = ok_result(index, energy);
+    result.SetThermochemistry(detail::compute_thermochemistry(
+        energy, frequencies, {0.64, 1.18, 1.81}, 18.0153, 1, false, 1, 298.15, 1.0, 100.0));
+    return result;
+}
+
+double free_energy_at(double energy, const std::vector<double>& frequencies, double temperature) {
+    return detail::compute_thermochemistry(energy, frequencies, {0.64, 1.18, 1.81}, 18.0153, 1,
+                                           false, 1, temperature, 1.0, 100.0)
+        .free_energy;
+}
+
+}  // namespace
+
+TEST(ResultSetTest, BoltzmannWeightsUseFreeEnergiesAtTheRequestedTemperature) {
+    // The second conformer is higher in energy but softer, so its weight grows with temperature.
+    const std::vector<double> stiff = {800.0, 1600.0, 3700.0};
+    const std::vector<double> soft = {40.0, 1600.0, 3700.0};
+    ResultSet results;
+    results.Add(thermo_result(0, 0.0, stiff));
+    results.Add(thermo_result(1, 0.8, soft));
+    results.Finalize();
+    for (double temperature : {298.15, 450.0}) {
+        const double g0 = free_energy_at(0.0, stiff, temperature);
+        const double g1 = free_energy_at(0.8, soft, temperature);
+        const double ratio = std::exp(-(g1 - g0) / (Units::GAS_CONSTANT_KCAL * temperature));
+        const std::map<unsigned, double> weights = results.GetBoltzmannWeights(temperature);
+        ASSERT_EQ(weights.size(), 2u);
+        EXPECT_NEAR(weights.at(0), 1.0 / (1.0 + ratio), 1e-12) << temperature;
+        EXPECT_NEAR(weights.at(1), ratio / (1.0 + ratio), 1e-12) << temperature;
+    }
+    // Weighting by the electronic energies would give a different answer.
+    const double electronic = std::exp(-0.8 / (Units::GAS_CONSTANT_KCAL * 450.0));
+    EXPECT_GT(std::abs(results.GetBoltzmannWeights(450.0).at(1) - electronic / (1.0 + electronic)),
+              1e-3);
+}
+
+TEST(ResultSetTest, BoltzmannWeightsRejectAMixOfThermochemistry) {
+    ResultSet results;
+    results.Add(thermo_result(0, 0.0, {800.0, 1600.0, 3700.0}));
+    results.Add(ok_result(1, 0.5));
+    results.Finalize();
+    EXPECT_THROW(results.GetBoltzmannWeights(298.15), OEVibeError);
+}
+
+TEST(ResultSetTest, BoltzmannWeightsIgnoreConformersThatAreNotOk) {
+    ResultSet results;
+    results.Add(thermo_result(0, 0.0, {800.0, 1600.0, 3700.0}));
+    ConformerResult stopped;
+    stopped.SetConformerIndex(1);
+    stopped.SetEnergy(-5.0);
+    stopped.SetStatus(ConformerStatus::NOT_CONVERGED, "optimization stage: iteration limit");
+    results.Add(stopped);
+    results.Finalize();
+    const std::map<unsigned, double> weights = results.GetBoltzmannWeights(298.15);
+    ASSERT_EQ(weights.size(), 1u);
+    EXPECT_DOUBLE_EQ(weights.at(0), 1.0);
 }

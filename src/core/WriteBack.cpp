@@ -62,6 +62,17 @@ void write_back(OEChem::OEMolBase& mol, const MolecularSystem& system, ResultSet
             } else {
                 OEChem::OEDeleteSDData(*target, prefix + "RelativeEnergy");
             }
+            if (result.HasThermochemistry()) {
+                const Thermochemistry& thermo = result.GetThermochemistry();
+                OEChem::OESetSDData(*target, prefix + "ZPE", format_value(thermo.zpe));
+                OEChem::OESetSDData(*target, prefix + "Enthalpy", format_value(thermo.enthalpy));
+                OEChem::OESetSDData(*target, prefix + "FreeEnergy",
+                                    format_value(thermo.free_energy));
+            } else {
+                for (const char* quantity : {"ZPE", "Enthalpy", "FreeEnergy"}) {
+                    OEChem::OEDeleteSDData(*target, prefix + quantity);
+                }
+            }
         }
     }
     if (options.GetAssignPartialCharges()) {

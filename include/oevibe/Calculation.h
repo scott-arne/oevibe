@@ -3,6 +3,8 @@
 
 #include <oechem.h>
 
+#include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -31,15 +33,45 @@ public:
     /// :raises InputError: When the molecule fails validation or a constraint names an atom
     ///     that is not in the molecule; nothing runs then.
     ResultSet Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& options);
+    /// Frequencies and thermochemistry for every conformer (spec 7.2, 7.3): an optional
+    /// optimization, the Hessian, and the analysis, in one session per conformer (spec 6.4).
+    /// A stage that stops gives the conformer its status and skips the later stages (spec 7.5).
+    /// With ``SetOptimizeFirst(true)`` final coordinates are written back unless disabled.
+    /// :raises OptionsError: When the thermo options or their optimizer options are invalid,
+    ///     including any frozen atom, constraint, or restraint.
+    /// :raises InputError: When the molecule fails validation; nothing runs then.
+    ResultSet Frequencies(OEChem::OEMolBase& mol, const ThermoOptions& options);
+    /// Relaxed dihedral scan by wavefront propagation (spec 7.4). Every input conformer seeds
+    /// the grid point nearest its dihedral values, and each grid-point optimization runs in a
+    /// fresh engine session with the scanned dihedrals held at the grid values. Constraints and
+    /// restraints without a target, and position-restraint references, take their values from
+    /// the first input conformer at every grid point. Nothing is written back to ``mol`` beyond
+    /// spec 6.1 input preparation.
+    /// :raises OptionsError: When the scan options are invalid, or properties are requested
+    ///     (scan points carry none, so this includes ``SetAssignPartialCharges(true)``).
+    /// :raises InputError: When the molecule fails validation, or a scanned dihedral or a
+    ///     constraint names an atom that is not in the molecule; nothing runs then.
+    ScanResult Scan(OEChem::OEMolBase& mol, const ScanOptions& options);
 
     const CalculationOptions& GetOptions() const;
     const std::string& GetEngineName() const;
 
 private:
     struct CallState;
+    /// One conformer's computation inside ``RunConformers``. On success it sets the values and
+    /// the final status; on failure it throws, after setting the values that spec 7.5 keeps.
+    using ConformerBody = std::function<void(ConformerResult& result, unsigned position)>;
 
     CallState Prepare(OEChem::OEMolBase& mol) const;
     ResultSet RunSinglePoints(OEChem::OEMolBase& mol, bool gradient);
+    /// Runs ``body`` once per conformer on a fresh ``NewResult`` and applies spec 7.5 to its
+    /// exceptions: ``UnsupportedError`` discards everything ``body`` set and gives UNSUPPORTED;
+    /// any other ``std::exception`` keeps those values and gives ENGINE_ERROR with its text.
+    /// Then records timings, finalizes the results, and writes them back (spec 6.5).
+    ResultSet RunConformers(OEChem::OEMolBase& mol, const CallState& state,
+                            const std::map<std::string, std::string>& resolved,
+                            std::chrono::steady_clock::time_point call_start, double setup_seconds,
+                            bool write_coordinates, const ConformerBody& body);
     ConformerResult NewResult(const CallState& state, unsigned position,
                               const std::map<std::string, std::string>& resolved) const;
     /// :returns: How the snapshot's partial charges are prepared for the resolved method.

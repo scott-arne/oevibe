@@ -5,6 +5,7 @@ include(OpenEyeSWIG)
 set(_OEVIBE_SWIG_DEPENDS
     ${CMAKE_SOURCE_DIR}/include/oevibe/oevibe.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Units.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/engines/RuntimeLibraries.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Method.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Preset.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Solvent.h

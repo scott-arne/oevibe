@@ -123,6 +123,17 @@ set(OEVIBE_SOURCES
     src/core/Lbfgs.cpp
     src/core/AncRfo.cpp
     src/core/Optimizer.cpp
+    src/engines/RuntimeLibrary.cpp
+    src/engines/TbliteLibrary.cpp
+    src/engines/TbliteEngine.cpp
+    src/engines/ElectronicProperties.cpp
+    src/engines/XtbLibrary.cpp
+    src/engines/XtbEngine.cpp
+    src/core/Hessian.cpp
+    src/core/Frequencies.cpp
+    src/core/Thermochemistry.cpp
+    src/core/ScanGrid.cpp
+    src/core/Wavefront.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
@@ -148,6 +159,7 @@ target_link_libraries(oevibe
         OpenEye::OEQuacpac
     PRIVATE
         $<BUILD_INTERFACE:oevibe_eigen>
+        ${CMAKE_DL_LIBS}
 )
 
 # Tests

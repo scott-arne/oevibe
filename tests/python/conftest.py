@@ -1,5 +1,7 @@
 """Shared fixtures and configuration for oevibe Python tests."""
 
+import os
+
 import pytest
 
 pytest.importorskip("openeye.oechem", reason="OpenEye Toolkits not installed")
@@ -38,3 +40,23 @@ def flat_ethanol():
     mol = oechem.OEGraphMol()
     oechem.OESmilesToMol(mol, "CCO")
     return mol
+
+
+def _engine_library(variable: str) -> str:
+    """:returns: The library path in ``variable``; skips the test when it names no file."""
+    path = os.environ.get(variable, "")
+    if not path or not os.path.isfile(path):
+        pytest.skip(f"{variable} is unset or does not name an existing file")
+    return path
+
+
+@pytest.fixture
+def tblite_library() -> str:
+    """Path to libtblite from ``OEVIBE_TBLITE_LIBRARY``; skips the test when it is unusable."""
+    return _engine_library("OEVIBE_TBLITE_LIBRARY")
+
+
+@pytest.fixture
+def xtb_library() -> str:
+    """Path to libxtb from ``OEVIBE_XTB_LIBRARY``; skips the test when it is unusable."""
+    return _engine_library("OEVIBE_XTB_LIBRARY")

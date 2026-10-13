@@ -35,6 +35,18 @@ add_executable(oevibe_tests
     test_lbfgs.cpp
     test_anc_rfo.cpp
     test_optimizer.cpp
+    test_runtime_library.cpp
+    test_tblite_engine.cpp
+    test_electronic_properties.cpp
+    test_xtb_engine.cpp
+    test_engine_integration.cpp
+    test_hessian.cpp
+    test_frequencies.cpp
+    test_thermochemistry.cpp
+    test_calculation_frequencies.cpp
+    test_scan_grid.cpp
+    test_wavefront.cpp
+    test_calculation_scan.cpp
 )
 
 target_link_libraries(oevibe_tests
