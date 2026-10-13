@@ -566,6 +566,12 @@ same molecule must not be passed to calculations from more than one thread at a 
 // Wrapped API
 // ============================================================================
 %include "oevibe/Units.h"
+// The Python package passes its interpreter's library directory at import (spec 8.3). No
+// %threadallow names these two functions, so they keep the GIL under the nothreadallow default
+// above: they only copy a string, so releasing it would buy nothing, and holding it keeps the
+// setter ordered with the Calculation constructor, which also holds the GIL and is where an
+// engine first reads the directory.
+%include "oevibe/engines/RuntimeLibraries.h"
 %include "oevibe/Method.h"
 %include "oevibe/Preset.h"
 %include "oevibe/Solvent.h"

@@ -39,6 +39,7 @@ add_executable(oevibe_tests
     test_tblite_engine.cpp
     test_electronic_properties.cpp
     test_xtb_engine.cpp
+    test_engine_integration.cpp
 )
 
 target_link_libraries(oevibe_tests

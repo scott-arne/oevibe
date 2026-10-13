@@ -65,9 +65,3 @@ def test_out_of_range_integers_are_option_errors(butanol_conformers):
 def test_input_errors(flat_ethanol):
     with pytest.raises(oevibe.InputError):
         oevibe.energy(flat_ethanol, method="mmff94")
-
-
-def test_gfn_methods_wait_for_plan_b(butanol_conformers):
-    # gfn2-xtb is the default method; its tblite engine arrives in Plan B.
-    with pytest.raises(oevibe.EngineUnavailableError):
-        oevibe.energy(butanol_conformers)
