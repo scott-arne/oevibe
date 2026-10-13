@@ -560,7 +560,7 @@ _preload_bundled_libs()
 _load_cached_extension_if_needed()
 _check_openeye_version()
 
-from ._verbs import energy, gradient, optimize
+from ._verbs import energy, frequencies, gradient, optimize
 from .oevibe import (
     Algorithm,
     Calculation,
@@ -581,6 +581,8 @@ from .oevibe import (
     ResultSet,
     Solvent,
     SolventModel,
+    Thermochemistry,
+    ThermoOptions,
     Timings,
     UnsupportedError,
     get_python_library_directory,
@@ -627,11 +629,14 @@ __all__ = [
     "ResultSet",
     "Solvent",
     "SolventModel",
+    "ThermoOptions",
+    "Thermochemistry",
     "Timings",
     "UnsupportedError",
     "__version__",
     "__version_info__",
     "energy",
+    "frequencies",
     "get_python_library_directory",
     "gradient",
     "optimize",

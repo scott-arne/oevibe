@@ -34,6 +34,15 @@ def _checked_int(name: str, value: Any, minimum: int, maximum: int) -> int:
     return number
 
 
+def _checked_float(name: str, value: Any) -> float:
+    # SWIG raises TypeError for a value it cannot convert to a double; the verbs report every
+    # invalid option as OptionsError, and the C++ setters check the range.
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise _core.OptionsError(f"{name} must be a number, got {value!r}") from None
+
+
 def _preset(value: Any) -> int:
     if isinstance(value, str):
         try:
@@ -225,3 +234,44 @@ def optimize(
     if constraints is not None:
         optimizer.SetConstraints(constraints)
     return _core.Calculation(options).Optimize(mol, optimizer)
+
+
+def frequencies(
+    mol: Any,
+    method: Any = "gfn2-xtb",
+    *,
+    optimize: bool = True,
+    temperature: float = 298.15,
+    pressure: float = 1.0,
+    solvent: Any = None,
+    engine: str | None = None,
+    preset: Any = "standard",
+    properties: Iterable[Any] = (),
+    charge: int | None = None,
+    multiplicity: int | None = None,
+    keywords: Mapping[str, Any] | None = None,
+) -> Any:
+    """Frequencies and thermochemistry for every conformer of ``mol``.
+
+    Shared parameters match :func:`energy`. Each conformer is optimized first (unless
+    ``optimize`` is false), then its Hessian is computed and analyzed; the optimized coordinates
+    are written back. Building the options and the calculation holds the GIL; only the
+    calculation releases it, after copying the thermo options, so do not pass the same molecule
+    to calculations on more than one thread at a time.
+
+    :param optimize: Optimize before the Hessian; with ``False`` the input geometry is analyzed
+        and the molecule's coordinates are left unchanged.
+    :param temperature: Temperature in K for the thermochemistry.
+    :param pressure: Pressure in atm for the translational entropy.
+    :returns: A :class:`ResultSet`; ``GetBoltzmannWeights`` then weights by free energy.
+    :raises OptionsError: For invalid options, including a temperature or pressure that is not
+        a finite number greater than 0.
+    """
+    options = _calculation_options(
+        method, solvent, engine, preset, properties, charge, multiplicity, keywords
+    )
+    thermo = _core.ThermoOptions()
+    thermo.SetOptimizeFirst(bool(optimize))
+    thermo.SetTemperature(_checked_float("temperature", temperature))
+    thermo.SetPressure(_checked_float("pressure", pressure))
+    return _core.Calculation(options).Frequencies(mol, thermo)

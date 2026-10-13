@@ -350,19 +350,20 @@ OE_CROSS_RUNTIME_NULLABLE_PTR_TYPEMAPS(OESystem::OEScalarGrid, _oevibe_is_oescal
 OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Expected OEReceptor object.")
 
 // ============================================================================
-// GIL: held by default, released only for Energy, Gradient, and Optimize
+// GIL: held by default, released only for Energy, Gradient, Optimize, and Frequencies
 // ============================================================================
 // A feature applies only to declarations parsed after it, so this block precedes every
 // wrapper-generating directive. Plan A engines are native C++ and never call back into Python,
 // so releasing the GIL around a calculation is safe. The constructor keeps the GIL: it copies
 // the caller's CalculationOptions, which another Python thread could be editing, and it only
-// validates, so there is no calculation to overlap with. Optimize reads its OptimizerOptions
-// for the whole run, so its wrapper copies them while the GIL is still held (the typemap before
-// Calculation.h below).
+// validates, so there is no calculation to overlap with. Optimize and Frequencies read their
+// options for the whole run, so their wrappers copy them while the GIL is still held (the
+// typemaps before Calculation.h below).
 %feature("nothreadallow", "1");
 %threadallow OEVIBE::Calculation::Energy;
 %threadallow OEVIBE::Calculation::Gradient;
 %threadallow OEVIBE::Calculation::Optimize;
+%threadallow OEVIBE::Calculation::Frequencies;
 
 // ============================================================================
 // STL support
@@ -551,14 +552,15 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %pythonappend OEVIBE::CalculationOptions::GetMethod %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetSolvent %{ val._parent = self %}
 
-// Energy, Gradient, and Optimize release the GIL (above), so the molecule they read must not be
-// shared with another thread that is using it.
+// Energy, Gradient, Optimize, and Frequencies release the GIL (above), so the molecule they read
+// must not be shared with another thread that is using it.
 %feature("docstring") OEVIBE::Calculation
 "Runs tasks over every conformer of a molecule with one resolved engine (spec 5.6).
 
-Not thread-safe; use one per thread. Construction holds the GIL. Energy, Gradient, and Optimize
-release it while they evaluate; Optimize copies its OptimizerOptions before releasing it. The
-same molecule must not be passed to calculations from more than one thread at a time."
+Not thread-safe; use one per thread. Construction holds the GIL. Energy, Gradient, Optimize, and
+Frequencies release it while they evaluate; Optimize and Frequencies copy their options before
+releasing it. The same molecule must not be passed to calculations from more than one thread at
+a time."
 
 // ============================================================================
 // Version
@@ -612,10 +614,11 @@ same molecule must not be passed to calculations from more than one thread at a 
 %immutable;
 %include "oevibe/Result.h"
 %mutable;
-// Optimize runs with the GIL released and reads its options throughout, so the wrapper converts
-// them into a private copy first; argument conversion runs before the GIL is released, so no
-// other Python thread can edit the caller's object mid-copy or mid-run. The typemap is cleared
-// after Calculation.h so no other function with an ``options`` parameter picks it up.
+// Optimize and Frequencies run with the GIL released and read their options throughout, so the
+// wrappers convert them into private copies first; argument conversion runs before the GIL is
+// released, so no other Python thread can edit the caller's object mid-copy or mid-run. The
+// typemaps are cleared after Calculation.h so no other function with an ``options`` parameter
+// picks them up.
 %typemap(in) const OEVIBE::OptimizerOptions& options
     (void *argp = 0, int res = 0, OEVIBE::OptimizerOptions snapshot) {
     res = SWIG_ConvertPtr($input, &argp, $descriptor, 0);
@@ -628,8 +631,21 @@ same molecule must not be passed to calculations from more than one thread at a 
     snapshot = *reinterpret_cast< $1_ltype >(argp);
     $1 = &snapshot;
 }
+%typemap(in) const OEVIBE::ThermoOptions& options
+    (void *argp = 0, int res = 0, OEVIBE::ThermoOptions snapshot) {
+    res = SWIG_ConvertPtr($input, &argp, $descriptor, 0);
+    if (!SWIG_IsOK(res)) {
+        SWIG_exception_fail(SWIG_ArgError(res), "Expected ThermoOptions object.");
+    }
+    if (!argp) {
+        SWIG_exception_fail(SWIG_NullReferenceError, "Null reference.");
+    }
+    snapshot = *reinterpret_cast< $1_ltype >(argp);
+    $1 = &snapshot;
+}
 %include "oevibe/Calculation.h"
 %clear const OEVIBE::OptimizerOptions& options;
+%clear const OEVIBE::ThermoOptions& options;
 
 // A declaration takes its features when it is parsed, so this lifts the %ignore only for the
 // %extend below, not for the header's const-reference method parsed above.
