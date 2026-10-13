@@ -48,7 +48,8 @@ public:
     /// :raises std::out_of_range: For an index past the end.
     std::vector<std::size_t> Neighbors(std::size_t index) const;
     /// Distances are angular differences wrapped to [0, 180] on every axis, because a dihedral
-    /// is periodic even where the grid's adjacency is not; ties go to the lower index.
+    /// is periodic even where the grid's adjacency is not. Distances within SCAN_ANGLE_TOLERANCE
+    /// of the smallest are ties, and ties go to the lower index.
     /// :returns: The point nearest ``angles`` (degrees, one per axis).
     /// :raises std::invalid_argument: When ``angles`` does not have one value per axis.
     std::size_t Nearest(const std::vector<double>& angles) const;

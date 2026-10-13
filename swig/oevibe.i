@@ -549,6 +549,7 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %pythonappend OEVIBE::ConformerResult::GetThermochemistry %{ val._parent = self %}
 %pythonappend OEVIBE::OptimizerOptions::GetConstraints %{ val._parent = self %}
 %pythonappend OEVIBE::ThermoOptions::GetOptimizerOptions %{ val._parent = self %}
+%pythonappend OEVIBE::ScanOptions::GetOptimizerOptions %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetMethod %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetSolvent %{ val._parent = self %}
 

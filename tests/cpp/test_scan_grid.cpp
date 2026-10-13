@@ -260,6 +260,23 @@ TEST(ScanGridTest, NearestUsesWrappedAngularDistance) {
     EXPECT_THROW(grid.Nearest({0.0}), std::invalid_argument);
 }
 
+// The values of the 0.1 axis are 0, 0.09999999999999999, 0.19999999999999998, and 0.3, so the
+// computed distances from a midpoint differ in the last bit; ties still go to the lower index.
+TEST(ScanGridTest, NearestTiesGoToTheLowerIndexDespiteRounding) {
+    const detail::ScanGrid axis({detail::build_scan_axis(0.0, 0.3, 0.1)});
+    ASSERT_EQ(axis.Size(), 4u);
+    EXPECT_EQ(axis.Nearest({0.05}), 0u);
+    EXPECT_EQ(axis.Nearest({0.15}), 1u);
+    EXPECT_EQ(axis.Nearest({0.25}), 2u);
+    // Past the tolerance the nearer value wins again.
+    EXPECT_EQ(axis.Nearest({0.15001}), 2u);
+    EXPECT_EQ(axis.Nearest({0.14999}), 1u);
+
+    const detail::ScanGrid grid(
+        {detail::build_scan_axis(0.0, 0.3, 0.1), detail::build_scan_axis(-180.0, 180.0, 15.0)});
+    EXPECT_EQ(grid.Nearest({0.15, 7.5}), 1u * 24u + 11u);
+}
+
 TEST(ScanGridTest, BuildScanGridFollowsTheOptions) {
     ScanOptions options = one_dihedral();
     options.AddDihedral(1, 2, 3, 4);

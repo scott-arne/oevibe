@@ -108,13 +108,22 @@ std::size_t ScanGrid::Nearest(const std::vector<double>& angles) const {
     // The grid is a Cartesian product, so the nearest point is the nearest value on each axis.
     std::vector<std::size_t> positions(axes_.size(), 0);
     for (std::size_t k = 0; k < axes_.size(); ++k) {
-        double best = 0.0;
-        for (std::size_t p = 0; p < axes_[k].values.size(); ++p) {
-            const double distance =
-                std::abs(normalize_dihedral_degrees(angles[k] - axes_[k].values[p]));
-            if (p == 0 || distance < best) {
-                best = distance;
+        const std::vector<double>& values = axes_[k].values;
+        const auto distance = [&](std::size_t p) {
+            return std::abs(normalize_dihedral_degrees(angles[k] - values[p]));
+        };
+        double best = distance(0);
+        for (std::size_t p = 1; p < values.size(); ++p) {
+            best = std::min(best, distance(p));
+        }
+        // A midpoint between two values is equidistant only to within rounding: for a 0.1 step
+        // the computed distances differ in the last bit, and a strict comparison would pick
+        // whichever side rounds lower. The grid already treats SCAN_ANGLE_TOLERANCE as exact
+        // when accepting a step, so distances that close are ties and the lower index wins.
+        for (std::size_t p = 0; p < values.size(); ++p) {
+            if (distance(p) <= best + SCAN_ANGLE_TOLERANCE) {
                 positions[k] = p;
+                break;
             }
         }
     }

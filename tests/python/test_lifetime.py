@@ -70,6 +70,24 @@ def test_optimizer_options_view_outlives_its_thermo_options():
     assert len(reused) == 64
 
 
+def test_optimizer_options_view_outlives_its_scan_options():
+    optimizer = oevibe.OptimizerOptions()
+    optimizer.SetMaxIterations(50)
+    scan = oevibe.oevibe.ScanOptions()
+    scan.SetOptimizerOptions(optimizer)
+    optimizer_view = scan.GetOptimizerOptions()
+    linked = getattr(optimizer_view, "_parent", None) is scan
+    del scan, optimizer
+    gc.collect()
+    # Fresh default options land in the memory just freed, where a dangling view would find the
+    # optimizer's iteration limit unset.
+    reused = [oevibe.oevibe.ScanOptions() for _ in range(64)]
+
+    assert optimizer_view.GetMaxIterations() == 50
+    assert linked
+    assert len(reused) == 64
+
+
 def test_thermochemistry_view_keeps_its_result_alive(monkeypatch):
     # A real frequencies result cannot show a missing link: freed memory is not reliably
     # overwritten, so reading a view after its result set is deleted passes either way. A stand-in
