@@ -131,6 +131,7 @@ set(OEVIBE_SOURCES
     src/engines/XtbEngine.cpp
     src/core/Hessian.cpp
     src/core/Frequencies.cpp
+    src/core/Thermochemistry.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

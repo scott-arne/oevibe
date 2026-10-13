@@ -42,6 +42,7 @@ add_executable(oevibe_tests
     test_engine_integration.cpp
     test_hessian.cpp
     test_frequencies.cpp
+    test_thermochemistry.cpp
 )
 
 target_link_libraries(oevibe_tests

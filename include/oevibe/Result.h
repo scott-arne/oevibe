@@ -55,6 +55,27 @@ struct Timings {
     double total = 0.0;
 };
 
+/// Ideal-gas, rigid-rotor, quasi-RRHO thermochemistry of one conformer (spec 5.7, 7.3), with
+/// the inputs needed to recompute it at another temperature. H = E + ZPE + E_trans + E_rot +
+/// E_vib + kT per molecule (RT per mole, the ideal-gas PV term); G = H - T S.
+struct Thermochemistry {
+    double temperature = 298.15;            ///< K
+    double pressure = 1.0;                  ///< atm
+    double zpe = 0.0;                       ///< kcal/mol, real modes only
+    double enthalpy = 0.0;                  ///< kcal/mol, E + ZPE + thermal
+    double entropy = 0.0;                   ///< cal/(mol K)
+    double free_energy = 0.0;               ///< kcal/mol, H - T S
+    double free_energy_correction = 0.0;    ///< kcal/mol, G - E
+    double electronic_energy = 0.0;         ///< kcal/mol, the E used above
+    std::vector<double> frequencies;        ///< cm^-1, every vibrational mode (imaginary negative)
+    std::vector<double> principal_moments;  ///< 3 values, amu Angstrom^2
+    double total_mass = 0.0;                ///< amu
+    unsigned symmetry_number = 1;
+    bool linear = false;
+    unsigned multiplicity = 1;
+    double quasi_rrho_cutoff = 100.0;  ///< cm^-1
+};
+
 /// One conformer's result. Atom-indexed arrays use the OpenEye layout (spec 3.1). Absent
 /// values throw ``OEVibeError`` from their getters.
 class ConformerResult {
