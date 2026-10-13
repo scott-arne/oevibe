@@ -64,6 +64,20 @@ bool any_warning_contains(const ConformerResult& result, const std::string& part
     return false;
 }
 
+/// :returns: The resolved-option keys starting with ``prefix``, sorted, so that a test can pin a
+///     whole group of provenance keys. The keys are hashed into the options digest, so a group
+///     that gains or loses one is a digest change.
+std::vector<std::string> keys_with_prefix(const std::map<std::string, std::string>& resolved,
+                                          const std::string& prefix) {
+    std::vector<std::string> keys;
+    for (const auto& [key, value] : resolved) {
+        if (key.rfind(prefix, 0) == 0) {
+            keys.push_back(key);
+        }
+    }
+    return keys;
+}
+
 /// Re-exposes the OpenEye force fields without their analytic Hessian, so the
 /// finite-difference path runs on the same potential as the analytic one.
 class NoHessianEngine : public Engine {
@@ -143,7 +157,19 @@ TEST(CalculationFrequenciesTest, Mmff94GivesModesAndThermochemistry) {
     EXPECT_EQ(resolved.at("thermo.quasi_rrho_cutoff"), "100.000000");
     EXPECT_EQ(resolved.at("thermo.symmetry_number"), "1");
     EXPECT_EQ(resolved.at("thermo.optimize_first"), "true");
+    // Spec 7.5: the six optimizer keys of a task that optimizes, and no more. ThermoOptions
+    // forbids constraints, so the three constraint keys Optimize and Scan also write would be
+    // permanently empty here, and adding them would move the frequency digest.
+    EXPECT_EQ(keys_with_prefix(resolved, "optimizer."),
+              (std::vector<std::string>{"optimizer.algorithm", "optimizer.energy_change",
+                                        "optimizer.gradient_norm", "optimizer.initial_trust_radius",
+                                        "optimizer.max_iterations", "optimizer.max_trust_radius"}));
     EXPECT_EQ(resolved.at("optimizer.algorithm"), "lbfgs");
+    EXPECT_EQ(resolved.at("optimizer.max_iterations"), "200");
+    EXPECT_EQ(resolved.at("optimizer.energy_change"), "0.003138");
+    EXPECT_EQ(resolved.at("optimizer.gradient_norm"), "1.185821");
+    EXPECT_EQ(resolved.at("optimizer.initial_trust_radius"), "0.100000");
+    EXPECT_EQ(resolved.at("optimizer.max_trust_radius"), "0.300000");
 }
 
 TEST(CalculationFrequenciesTest, ThermoSettingsReachTheResultsAndProvenance) {
@@ -167,8 +193,9 @@ TEST(CalculationFrequenciesTest, ThermoSettingsReachTheResultsAndProvenance) {
     EXPECT_EQ(resolved.at("thermo.quasi_rrho_cutoff"), "50.000000");
     EXPECT_EQ(resolved.at("thermo.symmetry_number"), "3");
     EXPECT_EQ(resolved.at("thermo.optimize_first"), "false");
-    // Without an optimization the optimizer settings cannot change the result.
-    EXPECT_EQ(resolved.count("optimizer.algorithm"), 0u);
+    // Without an optimization the optimizer settings cannot change the result, so none of them
+    // is recorded.
+    EXPECT_EQ(keys_with_prefix(resolved, "optimizer."), std::vector<std::string>());
 }
 
 TEST(CalculationFrequenciesTest, WithoutOptimizationTheInputGeometryIsAnalyzed) {
@@ -396,4 +423,66 @@ TEST(CalculationFrequenciesTest, AMalformedFirstEvaluationKeepsItsEnergy) {
     // Conformer 0 is the fake engine's reference, so only a later conformer shows that the kept
     // energy is the computed one rather than a default zero.
     EXPECT_GT(results.Get(1).GetEnergy(), 0.0);
+}
+
+// Spec 7.5: the frequency-stage rule governs over the single-stage one, so an UNSUPPORTED later
+// stage keeps what the completed stages computed. Optimize, a single-stage task, keeps nothing
+// from the same engine refusal (test_calculation_optimize.cpp).
+TEST(CalculationFrequenciesTest, UnsupportedPropertiesKeepTheOptimizationStageValues) {
+    const std::shared_ptr<test::FakeEngine> engine =
+        test::register_fake("freq-unsupported-properties");
+    engine->mode = test::FakeMode::UNSUPPORTED_PROPERTIES;
+    CalculationOptions options = fake_options("freq-unsupported-properties");
+    options.SetProperties(static_cast<unsigned>(Property::DIPOLE));
+    OEChem::OEMol mol = test::make_conformers("CCCCO");
+    const ResultSet results = Calculation(options).Frequencies(mol, ThermoOptions());
+    const ConformerResult& result = results.Get(0);
+    EXPECT_EQ(result.GetStatus(), ConformerStatus::UNSUPPORTED);
+    EXPECT_EQ(result.GetMessage().rfind("Hessian stage: ", 0), 0u) << result.GetMessage();
+    EXPECT_TRUE(contains(result.GetMessage(), "cannot compute properties")) << result.GetMessage();
+    // The optimization stage completed, so everything it computed survives the refusal.
+    EXPECT_TRUE(result.HasEnergy());
+    EXPECT_TRUE(result.HasCoordinates());
+    EXPECT_TRUE(result.HasOptimizationStats());
+    // The refusing stage and the stages after it contribute nothing.
+    EXPECT_FALSE(result.HasDipole());
+    EXPECT_FALSE(result.HasHessian());
+    EXPECT_FALSE(result.HasFrequencies());
+    EXPECT_FALSE(result.HasThermochemistry());
+    EXPECT_TRUE(any_warning_contains(result, "skipped: analysis"));
+}
+
+// Spec 7.2: the Hessian stage evaluates the requested properties at the geometry it analyzes,
+// which after an optimization is the optimized one, not the input.
+TEST(CalculationFrequenciesTest, RequestedPropertiesComeFromTheAnalyzedGeometry) {
+    test::register_fake("freq-properties");
+    CalculationOptions options = fake_options("freq-properties");
+    options.SetProperties(static_cast<unsigned>(Property::DIPOLE) |
+                          static_cast<unsigned>(Property::CHARGES));
+    OEChem::OEMol mol = test::make_conformers("CCCCO", 2);
+    ASSERT_GE(mol.NumConfs(), 2u);
+    std::vector<std::vector<double>> before;
+    for (OESystem::OEIter<OEChem::OEConfBase> conf = mol.GetConfs(); conf; ++conf) {
+        before.push_back(coordinates_of(*conf));
+    }
+    const ResultSet results = Calculation(options).Frequencies(mol, ThermoOptions());
+    ASSERT_EQ(results.Size(), mol.NumConfs());
+    // The fake engine's springs hold conformer 0's geometry, so only a later conformer moves far
+    // enough for the charges to tell the optimized geometry from the input one.
+    const ConformerResult& result = results.Get(1);
+    ASSERT_EQ(result.GetStatus(), ConformerStatus::OK) << result.GetMessage();
+    EXPECT_TRUE(result.HasFrequencies());
+    EXPECT_TRUE(result.HasThermochemistry());
+    ASSERT_TRUE(result.HasDipole());
+    EXPECT_EQ(result.GetDipole(), (std::vector<double>{0.0, 0.0, 1.0}));
+    // The fake engine's charge on an atom is 0.001 times its x coordinate.
+    ASSERT_TRUE(result.HasCharges());
+    const std::vector<double> charges = result.GetCharges();
+    const std::vector<double> optimized = result.GetCoordinates();
+    ASSERT_EQ(charges.size(), static_cast<std::size_t>(mol.NumAtoms()));
+    ASSERT_EQ(optimized.size(), 3 * charges.size());
+    EXPECT_NE(optimized, before[1]);
+    for (std::size_t i = 0; i < charges.size(); ++i) {
+        EXPECT_DOUBLE_EQ(charges[i], 0.001 * optimized[3 * i]) << "atom " << i;
+    }
 }
