@@ -306,7 +306,9 @@ void XtbEngine::SetLibraryPath(const std::string& path) {
 std::shared_ptr<const detail::XtbEngineState> XtbEngine::Load() const {
     // ``load_mutex_`` is taken before the default-path mutex, never the other way round.
     std::lock_guard<std::mutex> lock(load_mutex_);
-    if (state_ && state_->library) {
+    // Only a state that can run GFN0 is final. A library whose installation has no parameter
+    // file leaves the engine half loaded, and that half is what a later path has to repair.
+    if (state_ && state_->library && !state_->gfn0_parameter_file.empty()) {
         return state_;
     }
     std::string explicit_path = library_path_;
@@ -316,13 +318,18 @@ std::shared_ptr<const detail::XtbEngineState> XtbEngine::Load() const {
         explicit_path = value.path;
     }
     // The registry's built-in reads the default path, and a method lookup reaches it before a
-    // caller can set the path, so a failed load is retried when the path it used has changed.
-    // An unchanged path keeps the failure, and a loaded library is never replaced.
+    // caller can set the path, so an incomplete load is retried when the path it used has
+    // changed. An unchanged path keeps its outcome, and a usable state is never replaced.
     if (!state_ || explicit_path != attempted_path_) {
-        state_ = load_xtb(explicit_path);
+        std::shared_ptr<const detail::XtbEngineState> reloaded = load_xtb(explicit_path);
         attempted_path_ = explicit_path;
+        // A retry that loads nothing keeps the library the engine already holds, which is
+        // still open and still the one its sessions run on.
+        if (!state_ || reloaded->library) {
+            state_ = std::move(reloaded);
+        }
     }
-    // A caller may hold the returned state while a later call replaces a failed one.
+    // A caller may hold the returned state while a later call replaces an incomplete one.
     return state_;
 }
 

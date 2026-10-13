@@ -19,18 +19,20 @@ struct XtbEngineState;
 /// ``gfn-ff`` is declared but unavailable: C API 1.0 keeps GFN-FF topology files in the process
 /// working directory, which OEVibe never changes. The library loads on first use rather than
 /// at construction, so the Python package can pass its library directory before discovery runs.
-/// A successful load is kept for the engine's life. A failed one is kept only while the path it
-/// used stays the same: when the explicit path (the constructor's, else ``SetLibraryPath``'s)
-/// changes, the next call tries again. One process-wide mutex serializes every libxtb call,
-/// because the C API is not thread-safe.
+/// A load that can run GFN0-xTB, which needs the library and its parameter file, is kept for
+/// the engine's life. An outcome short of that is kept only while the path it used stays the
+/// same: when the explicit path (the constructor's, else ``SetLibraryPath``'s) changes, the
+/// next call tries again, and a retry that loads nothing keeps the library already open. One
+/// process-wide mutex serializes every libxtb call, because the C API is not thread-safe.
 class XtbEngine : public Engine {
 public:
     /// :param library_path: Overrides discovery for this instance; empty uses SetLibraryPath's
     ///     value and then spec 8.3 discovery. The library loads lazily on first use.
     explicit XtbEngine(std::string library_path = "");
     /// Default explicit path for instances built without one (the registry's built-in). An
-    /// instance reads it whenever it has no loaded library, so setting it after an early query
-    /// that failed lets the next call retry, but it never moves an instance that has loaded.
+    /// instance reads it whenever it cannot yet run GFN0-xTB, so setting it after an early
+    /// query that found no library, or one without a parameter file, lets the next call retry;
+    /// it never moves an instance that has loaded a complete installation.
     static void SetLibraryPath(const std::string& path);
     /// :returns: ``xtb``; never loads the library.
     std::string GetName() const override;
@@ -56,9 +58,10 @@ public:
                                                  const EngineSettings& settings) override;
 
 private:
-    /// :returns: The load outcome, computed on the first call. A loaded library is kept for the
-    ///     engine's life; a failure is replaced only when the explicit path has changed since
-    ///     it. The caller's pointer keeps its state alive across such a replacement.
+    /// :returns: The load outcome, computed on the first call. A library with its GFN0-xTB
+    ///     parameter file is kept for the engine's life; any other outcome is replaced only
+    ///     when the explicit path has changed since it, and only by one that has a library.
+    ///     The caller's pointer keeps its state alive across such a replacement.
     std::shared_ptr<const detail::XtbEngineState> Load() const;
 
     std::string library_path_;

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -114,6 +115,27 @@ protected:
     }
 
     std::filesystem::path root_;
+};
+
+/// A scratch directory that is removed with the object.
+class ScratchDirectory {
+public:
+    explicit ScratchDirectory(const std::string& name)
+        : path_(std::filesystem::temp_directory_path() /
+                ("oevibe-xtb-" + std::to_string(getpid()) + "-" + name)) {
+        std::filesystem::remove_all(path_);
+        std::filesystem::create_directories(path_);
+    }
+    ~ScratchDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+    ScratchDirectory(const ScratchDirectory&) = delete;
+    ScratchDirectory& operator=(const ScratchDirectory&) = delete;
+    const std::filesystem::path& Path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
 };
 
 /// Engine tests that need libxtb skip when OEVIBE_XTB_LIBRARY does not name a file.
@@ -276,6 +298,45 @@ TEST_F(XtbEngineTest, ASuccessfulLoadIsNotReplacedWhenTheDefaultPathChanges) {
     EXPECT_TRUE(builtin.IsAvailable());
     EXPECT_EQ(builtin.GetVersion(), "C API 1.0.0");
     const MolecularSystem system = make_system(WATER, 0, 1);
+    EXPECT_NEAR(evaluate(builtin, system, WATER, EvaluationRequest()).energy,
+                WATER_ENERGY_EH * Units::HARTREE_TO_KCAL, 1e-6);
+}
+
+// An installation without share/xtb leaves the engine half loaded: libxtb is open and GFN0 has
+// no parameter file. That state must not freeze either, or a default path that later names a
+// complete installation could never make GFN0 work.
+TEST_F(XtbEngineTest, AnInstallationWithoutTheParameterFileIsRetriedWhenTheDefaultPathChanges) {
+    const test::ScopedEnvironment xtbpath("XTBPATH", nullptr);
+    const test::ScopedEnvironment xtbhome("XTBHOME", nullptr);
+    // A symbolic link to the real libxtb loads, and the prefix it is read from holds no
+    // parameter file, so the library is usable and GFN0 is not.
+    const ScratchDirectory scratch("incomplete-installation");
+    std::filesystem::create_directories(scratch.Path() / "lib");
+    const std::filesystem::path link =
+        scratch.Path() / "lib" / std::filesystem::path(library_).filename();
+    std::filesystem::create_symlink(std::filesystem::absolute(library_), link);
+
+    const test::ScopedDefaultLibraryPath<XtbEngine> default_path(link.string());
+    XtbEngine builtin;
+    ASSERT_TRUE(builtin.IsAvailable()) << builtin.GetUnavailableReason();
+    const std::optional<MethodCapabilities> incomplete = find_method(builtin, Method(GFN0_XTB));
+    ASSERT_TRUE(incomplete.has_value());
+    ASSERT_FALSE(incomplete->available);
+    EXPECT_NE(incomplete->unavailable_reason.find(detail::XTB_GFN0_PARAMETER_FILE_NAME),
+              std::string::npos)
+        << incomplete->unavailable_reason;
+    const MolecularSystem system = make_system(WATER, 0, 1);
+    EXPECT_THROW(builtin.CreateSession(system, gfn0_settings()), EngineUnavailableError);
+
+    // A retry that loads nothing keeps the library the engine already holds.
+    XtbEngine::SetLibraryPath(test::unrelated_library_path());
+    EXPECT_TRUE(builtin.IsAvailable()) << builtin.GetUnavailableReason();
+    EXPECT_EQ(builtin.GetUnavailableReason(), "");
+
+    XtbEngine::SetLibraryPath(library_);
+    const std::optional<MethodCapabilities> complete = find_method(builtin, Method(GFN0_XTB));
+    ASSERT_TRUE(complete.has_value());
+    EXPECT_TRUE(complete->available) << complete->unavailable_reason;
     EXPECT_NEAR(evaluate(builtin, system, WATER, EvaluationRequest()).energy,
                 WATER_ENERGY_EH * Units::HARTREE_TO_KCAL, 1e-6);
 }

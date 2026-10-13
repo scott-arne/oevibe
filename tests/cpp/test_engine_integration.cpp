@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <oechem.h>
-#include <sys/wait.h>
 
 #include <algorithm>
 #include <cmath>
@@ -9,6 +8,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -101,19 +101,32 @@ void expect_tblite_tasks(const std::string& library, const char* method, const S
     EXPECT_EQ(result.GetProvenance().resolved_options.at("optimizer.algorithm"), "anc_rfo");
 }
 
-/// Exit code of ``gfn0_after_an_early_custom_method_lookup`` when the failure it needs cannot be
-/// made, because the system loader finds libxtb by its bare name.
-constexpr int LOADER_FINDS_XTB = 77;
+/// :returns: Why GFN0-xTB is unavailable on ``engine``, or "" when it is available. The method
+///     needs both the library and its parameter file, so an engine that holds a library is not
+///     yet one that can run GFN0.
+std::string gfn0_unavailable_reason(const Engine& engine) {
+    const std::optional<MethodCapabilities> gfn0 = find_method(engine, Method(GFN0_XTB));
+    if (!gfn0.has_value()) {
+        return "the engine does not declare gfn0-xtb";
+    }
+    return gfn0->available ? "" : gfn0->unavailable_reason;
+}
 
 /// Resolves a custom method before the default xtb path is set, as a C++ caller can, and then
 /// runs GFN0. Resolving asks every registered engine for its methods, the built-in xtb among
-/// them, which loads its library from the default path, and here that path fails.
-/// :returns: 0 when GFN0 then works, ``LOADER_FINDS_XTB`` when no early failure could be made,
-///     and 1 with the reason on stderr otherwise.
+/// them, which loads its library from the default path, and here that path fails. Where the
+/// system loader still finds a libxtb by its bare name, the load succeeds and GFN0 is
+/// unavailable all the same, because a bare name leaves no directory to search for the
+/// parameter file; either way the next step must be able to repair it.
+/// :returns: 0 when GFN0 then works, and 1 with the reason on stderr otherwise.
 int gfn0_after_an_early_custom_method_lookup(const std::string& library) {
     try {
         const test::ScopedEnvironment variable("OEVIBE_XTB_LIBRARY", nullptr);
         const test::ScopedEnvironment conda("CONDA_PREFIX", nullptr);
+        // The parameter file must come from the library's own installation, so that the early
+        // load cannot reach one and the repaired load can.
+        const test::ScopedEnvironment xtbpath("XTBPATH", nullptr);
+        const test::ScopedEnvironment xtbhome("XTBHOME", nullptr);
         const test::ScopedPythonLibraryDirectory python("");
         const test::ScopedDefaultLibraryPath<XtbEngine> default_path(
             "/nonexistent/lib/libxtb.6.dylib");
@@ -127,20 +140,26 @@ int gfn0_after_an_early_custom_method_lookup(const std::string& library) {
             return 1;
         }
         const std::shared_ptr<Engine> xtb = registry.Find("xtb");
-        if (xtb->IsAvailable()) {
-            return LOADER_FINDS_XTB;
+        if (gfn0_unavailable_reason(*xtb).empty()) {
+            std::cerr << "the early lookup left GFN0 available, so nothing had to be repaired\n";
+            return 1;
         }
         {
-            // Only a changed path reopens a failed load, so a source that now reaches the
+            // Only a changed path reopens an incomplete load, so a source that now reaches the
             // library while the path stays the same does not.
             const test::ScopedEnvironment reachable("OEVIBE_XTB_LIBRARY", library.c_str());
-            if (xtb->IsAvailable()) {
-                std::cerr << "the failed load was retried although the path did not change\n";
+            if (gfn0_unavailable_reason(*xtb).empty()) {
+                std::cerr << "the load was retried although the path did not change\n";
                 return 1;
             }
         }
 
         XtbEngine::SetLibraryPath(library);
+        const std::string reason = gfn0_unavailable_reason(*xtb);
+        if (!reason.empty()) {
+            std::cerr << "GFN0 stayed unavailable after the path changed: " << reason << "\n";
+            return 1;
+        }
         CalculationOptions options = options_for(GFN0_XTB);
         Calculation calculation(options);
         OEChem::OEMol input = test::make_conformers("CCO");
@@ -169,20 +188,9 @@ TEST(EngineIntegrationTest, AnEarlyCustomMethodLookupDoesNotFreezeGfn0Unavailabl
     }
     const std::string previous_style = GTEST_FLAG_GET(death_test_style);
     GTEST_FLAG_SET(death_test_style, "threadsafe");
-    int status = -1;
-    // The predicate runs in this process after the child exits, so it can keep the status.
-    EXPECT_EXIT(
-        std::exit(gfn0_after_an_early_custom_method_lookup(library)),
-        [&status](int child_status) {
-            status = child_status;
-            return WIFEXITED(child_status) && (WEXITSTATUS(child_status) == 0 ||
-                                               WEXITSTATUS(child_status) == LOADER_FINDS_XTB);
-        },
-        "");
+    EXPECT_EXIT(std::exit(gfn0_after_an_early_custom_method_lookup(library)),
+                ::testing::ExitedWithCode(0), "");
     GTEST_FLAG_SET(death_test_style, previous_style);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == LOADER_FINDS_XTB) {
-        GTEST_SKIP() << "the system loader finds a libxtb";
-    }
 }
 
 TEST(EngineIntegrationTest, Gfn2InTheGasPhaseThroughTblite) {
