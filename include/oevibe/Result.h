@@ -216,6 +216,93 @@ private:
     std::vector<ConformerResult> results_;
 };
 
+// NOLINTBEGIN(performance-enum-size)
+/// Per-grid-point outcome of a scan (spec 7.5).
+enum class ScanPointStatus { OK, NOT_CONVERGED, ENGINE_ERROR, UNSUPPORTED, NOT_ATTEMPTED };
+// NOLINTEND(performance-enum-size)
+
+/// :returns: The enumerator name, used in SD tags and messages.
+std::string scan_point_status_name(ScanPointStatus status);
+
+/// One grid point of a scan. Coordinates use the scanned molecule's OpenEye layout (spec 3.1).
+/// Absent values throw ``OEVibeError`` from their getters.
+class ScanPoint {
+public:
+    /// :returns: Degrees in (-180, 180], one per scanned dihedral.
+    std::vector<double> GetAngles() const;
+    void SetAngles(const std::vector<double>& angles);
+    ScanPointStatus GetStatus() const;
+    const std::string& GetMessage() const;
+    void SetStatus(ScanPointStatus status, const std::string& message);
+    bool HasEnergy() const;
+    double GetEnergy() const;  ///< kcal/mol, engine energy of the point's best result
+    void SetEnergy(double energy);
+    bool HasRelativeEnergy() const;
+    double GetRelativeEnergy() const;  ///< kcal/mol, set by the owning ScanResult
+    void SetRelativeEnergy(double energy);
+    void ClearRelativeEnergy();
+    bool HasCoordinates() const;
+    std::vector<double> GetCoordinates() const;  ///< Angstrom, OpenEye layout
+    void SetCoordinates(const std::vector<double>& coordinates);
+
+private:
+    std::vector<double> angles_;
+    ScanPointStatus status_ = ScanPointStatus::NOT_ATTEMPTED;
+    std::string message_;
+    std::optional<double> energy_;
+    std::optional<double> relative_energy_;
+    std::optional<std::vector<double>> coordinates_;
+};
+
+/// A relaxed dihedral scan (spec 5.7): one point per grid point, in grid order (row-major, the
+/// first dihedral varying slowest).
+class ScanResult {
+public:
+    unsigned GetNumDihedrals() const;
+    /// :returns: The dihedral's four OpenEye atom indices.
+    /// :raises OEVibeError: For an index past the end.
+    std::vector<unsigned> GetDihedral(unsigned index) const;
+    std::size_t GetNumPoints() const;
+    /// :raises OEVibeError: For an index past the end.
+    const ScanPoint& GetPoint(std::size_t index) const;
+    /// :returns: Whether the optimization cap stopped the scan before propagation finished.
+    bool IsTruncated() const;
+    std::vector<std::string> GetWarnings() const;
+    const Provenance& GetProvenance() const;
+    /// :returns: A copy of the scanned molecule's graph with one conformer per point that has an
+    ///     energy, in grid order, each carrying the SD data ``<prefix>ScanAngles`` (degrees, comma
+    ///     separated in dihedral order), ``<prefix>Energy``, ``<prefix>RelativeEnergy`` (kcal/mol),
+    ///     and ``<prefix>Status``, where ``<prefix>`` is ``OEVibe.<method>.<solvent-tag>.``
+    ///     (spec 6.5).
+    OEChem::OEMol GetMolecule() const;
+    /// Replaces the contents of ``out`` with ``GetMolecule()``'s. Python receives the molecule
+    /// this way, through the cross-runtime reference typemap, as for
+    /// ``MolecularSystem::CopyMolecule`` (spec 6.2).
+    void CopyMolecule(OEChem::OEMCMolBase& out) const;
+
+    void AddDihedral(const std::vector<unsigned>& atoms);
+    void AddPoint(ScanPoint point);
+    void SetTruncated(bool truncated);
+    void AddWarning(const std::string& warning);
+    void SetProvenance(const Provenance& provenance);
+    /// Copies the graph of the scanned molecule, whose OpenEye layout the points' coordinates
+    /// use, and the SD tag prefix ``OEVibe.<method>.<solvent-tag>.`` of ``GetMolecule()``.
+    void SetMolecule(const OEChem::OEMolBase& mol, const std::string& tag_prefix);
+    /// Sets the relative energy of every point that has an energy, from the lowest (spec 5.7);
+    /// call once after the last ``AddPoint``.
+    void Finalize();
+
+private:
+    std::vector<std::vector<unsigned>> dihedrals_;
+    std::vector<ScanPoint> points_;
+    bool truncated_ = false;
+    std::vector<std::string> warnings_;
+    Provenance provenance_;
+    OEChem::OEGraphMol graph_;
+    std::vector<unsigned> oe_index_of_;  ///< Scanned molecule's atom index of each graph atom.
+    std::string tag_prefix_;
+};
+
 }  // namespace OEVIBE
 
 #endif  // OEVIBE_RESULT_H

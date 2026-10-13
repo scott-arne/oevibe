@@ -46,6 +46,7 @@ add_executable(oevibe_tests
     test_calculation_frequencies.cpp
     test_scan_grid.cpp
     test_wavefront.cpp
+    test_calculation_scan.cpp
 )
 
 target_link_libraries(oevibe_tests

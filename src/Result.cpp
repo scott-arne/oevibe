@@ -5,6 +5,7 @@
 #include <limits>
 
 #include "core/Thermochemistry.h"
+#include "core/WriteBack.h"
 #include "oevibe/Error.h"
 #include "oevibe/Units.h"
 
@@ -350,6 +351,142 @@ void ResultSet::Finalize() {
 void ResultSet::AddWarningToAll(const std::string& warning) {
     for (ConformerResult& result : results_) {
         result.AddWarning(warning);
+    }
+}
+
+std::string scan_point_status_name(ScanPointStatus status) {
+    switch (status) {
+        case ScanPointStatus::OK:
+            return "OK";
+        case ScanPointStatus::NOT_CONVERGED:
+            return "NOT_CONVERGED";
+        case ScanPointStatus::ENGINE_ERROR:
+            return "ENGINE_ERROR";
+        case ScanPointStatus::UNSUPPORTED:
+            return "UNSUPPORTED";
+        case ScanPointStatus::NOT_ATTEMPTED:
+            return "NOT_ATTEMPTED";
+    }
+    return "ENGINE_ERROR";
+}
+
+std::vector<double> ScanPoint::GetAngles() const { return angles_; }
+void ScanPoint::SetAngles(const std::vector<double>& angles) { angles_ = angles; }
+ScanPointStatus ScanPoint::GetStatus() const { return status_; }
+const std::string& ScanPoint::GetMessage() const { return message_; }
+void ScanPoint::SetStatus(ScanPointStatus status, const std::string& message) {
+    status_ = status;
+    message_ = message;
+}
+bool ScanPoint::HasEnergy() const { return energy_.has_value(); }
+double ScanPoint::GetEnergy() const { return require_value(energy_, "energy"); }
+void ScanPoint::SetEnergy(double energy) { energy_ = energy; }
+bool ScanPoint::HasRelativeEnergy() const { return relative_energy_.has_value(); }
+double ScanPoint::GetRelativeEnergy() const {
+    return require_value(relative_energy_, "relative energy");
+}
+void ScanPoint::SetRelativeEnergy(double energy) { relative_energy_ = energy; }
+void ScanPoint::ClearRelativeEnergy() { relative_energy_.reset(); }
+bool ScanPoint::HasCoordinates() const { return coordinates_.has_value(); }
+std::vector<double> ScanPoint::GetCoordinates() const {
+    return require_value(coordinates_, "coordinates");
+}
+void ScanPoint::SetCoordinates(const std::vector<double>& coordinates) {
+    coordinates_ = coordinates;
+}
+
+unsigned ScanResult::GetNumDihedrals() const { return static_cast<unsigned>(dihedrals_.size()); }
+std::vector<unsigned> ScanResult::GetDihedral(unsigned index) const {
+    if (index >= dihedrals_.size()) {
+        throw OEVibeError("dihedral index " + std::to_string(index) + " is out of range");
+    }
+    return dihedrals_[index];
+}
+std::size_t ScanResult::GetNumPoints() const { return points_.size(); }
+const ScanPoint& ScanResult::GetPoint(std::size_t index) const {
+    if (index >= points_.size()) {
+        throw OEVibeError("scan point index " + std::to_string(index) + " is out of range");
+    }
+    return points_[index];
+}
+bool ScanResult::IsTruncated() const { return truncated_; }
+std::vector<std::string> ScanResult::GetWarnings() const { return warnings_; }
+const Provenance& ScanResult::GetProvenance() const { return provenance_; }
+
+OEChem::OEMol ScanResult::GetMolecule() const {
+    OEChem::OEMol mol;
+    CopyMolecule(mol);
+    return mol;
+}
+
+void ScanResult::CopyMolecule(OEChem::OEMCMolBase& out) const {
+    out.Clear();
+    // The atom map ties each graph atom to its copy, whatever indices ``out`` hands out.
+    std::vector<OEChem::OEAtomBase*> copies(graph_.GetMaxAtomIdx(), nullptr);
+    OEChem::OECopyMol(out, graph_, copies.data());
+    out.DeleteConfs();
+    std::vector<double> coords(3 * out.GetMaxAtomIdx(), 0.0);
+    for (const ScanPoint& point : points_) {
+        if (!point.HasEnergy() || !point.HasCoordinates()) {
+            continue;
+        }
+        const std::vector<double> scanned = point.GetCoordinates();
+        for (OESystem::OEIter<OEChem::OEAtomBase> atom = graph_.GetAtoms(); atom; ++atom) {
+            const std::size_t source = 3 * static_cast<std::size_t>(oe_index_of_[atom->GetIdx()]);
+            const std::size_t target =
+                3 * static_cast<std::size_t>(copies[atom->GetIdx()]->GetIdx());
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                coords[target + axis] = scanned.at(source + axis);
+            }
+        }
+        OEChem::OEConfBase* conf = out.NewConf(coords.data());
+        std::string angles;
+        for (const double angle : point.GetAngles()) {
+            angles += (angles.empty() ? "" : ",") + detail::format_value(angle);
+        }
+        OEChem::OESetSDData(*conf, tag_prefix_ + "ScanAngles", angles);
+        OEChem::OESetSDData(*conf, tag_prefix_ + "Energy", detail::format_value(point.GetEnergy()));
+        if (point.HasRelativeEnergy()) {
+            OEChem::OESetSDData(*conf, tag_prefix_ + "RelativeEnergy",
+                                detail::format_value(point.GetRelativeEnergy()));
+        }
+        OEChem::OESetSDData(*conf, tag_prefix_ + "Status",
+                            scan_point_status_name(point.GetStatus()));
+    }
+}
+
+void ScanResult::AddDihedral(const std::vector<unsigned>& atoms) { dihedrals_.push_back(atoms); }
+void ScanResult::AddPoint(ScanPoint point) { points_.push_back(std::move(point)); }
+void ScanResult::SetTruncated(bool truncated) { truncated_ = truncated; }
+void ScanResult::AddWarning(const std::string& warning) { warnings_.push_back(warning); }
+void ScanResult::SetProvenance(const Provenance& provenance) { provenance_ = provenance; }
+
+void ScanResult::SetMolecule(const OEChem::OEMolBase& mol, const std::string& tag_prefix) {
+    graph_.Clear();
+    std::vector<OEChem::OEAtomBase*> copies(mol.GetMaxAtomIdx(), nullptr);
+    OEChem::OECopyMol(graph_, mol, copies.data());
+    oe_index_of_.assign(graph_.GetMaxAtomIdx(), 0);
+    for (OESystem::OEIter<OEChem::OEAtomBase> atom = mol.GetAtoms(); atom; ++atom) {
+        oe_index_of_[copies[atom->GetIdx()]->GetIdx()] = atom->GetIdx();
+    }
+    tag_prefix_ = tag_prefix;
+}
+
+void ScanResult::Finalize() {
+    bool any = false;
+    double minimum = 0.0;
+    for (const ScanPoint& point : points_) {
+        if (point.HasEnergy() && (!any || point.GetEnergy() < minimum)) {
+            minimum = point.GetEnergy();
+            any = true;
+        }
+    }
+    for (ScanPoint& point : points_) {
+        if (point.HasEnergy()) {
+            point.SetRelativeEnergy(point.GetEnergy() - minimum);
+        } else {
+            point.ClearRelativeEnergy();
+        }
     }
 }
 

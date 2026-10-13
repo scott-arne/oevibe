@@ -41,6 +41,17 @@ public:
     ///     including any frozen atom, constraint, or restraint.
     /// :raises InputError: When the molecule fails validation; nothing runs then.
     ResultSet Frequencies(OEChem::OEMolBase& mol, const ThermoOptions& options);
+    /// Relaxed dihedral scan by wavefront propagation (spec 7.4). Every input conformer seeds
+    /// the grid point nearest its dihedral values, and each grid-point optimization runs in a
+    /// fresh engine session with the scanned dihedrals held at the grid values. Constraints and
+    /// restraints without a target, and position-restraint references, take their values from
+    /// the first input conformer at every grid point. Nothing is written back to ``mol`` beyond
+    /// spec 6.1 input preparation.
+    /// :raises OptionsError: When the scan options are invalid, or properties are requested
+    ///     (scan points carry none, so this includes ``SetAssignPartialCharges(true)``).
+    /// :raises InputError: When the molecule fails validation, or a scanned dihedral or a
+    ///     constraint names an atom that is not in the molecule; nothing runs then.
+    ScanResult Scan(OEChem::OEMolBase& mol, const ScanOptions& options);
 
     const CalculationOptions& GetOptions() const;
     const std::string& GetEngineName() const;

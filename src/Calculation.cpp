@@ -1,22 +1,29 @@
 #include "oevibe/Calculation.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 #include "core/ConstraintMath.h"
 #include "core/Frequencies.h"
+#include "core/Geometry.h"
 #include "core/Hessian.h"
 #include "core/InputPrep.h"
 #include "core/Optimizer.h"
+#include "core/ScanGrid.h"
 #include "core/Sha256.h"
 #include "core/Thermochemistry.h"
+#include "core/Wavefront.h"
 #include "core/WriteBack.h"
 #include "oevibe/EngineRegistry.h"
 #include "oevibe/Error.h"
+#include "oevibe/Units.h"
 
 namespace OEVIBE {
 
@@ -644,6 +651,179 @@ ResultSet Calculation::Frequencies(OEChem::OEMolBase& mol, const ThermoOptions& 
         });
     };
     return RunConformers(mol, state, resolved, call_start, setup_seconds, optimize_first, body);
+}
+
+ScanResult Calculation::Scan(OEChem::OEMolBase& mol, const ScanOptions& options) {
+    // Every check that can reject the call runs before Prepare, which may add hydrogens to the
+    // caller's molecule. Adding hydrogens appends atoms without renumbering, so every atom
+    // checked here stays valid.
+    options.Validate();
+    if (settings_.properties != 0) {
+        throw OptionsError("scans do not compute properties; requested: " +
+                           property_names(settings_.properties));
+    }
+    const OptimizerOptions& optimizer = options.GetOptimizerOptions();
+    // At each grid point the scanned dihedrals join the caller's terms as exact constraints.
+    // These placeholder targets only serve the atom check and the algorithm choice, which
+    // depend on which terms exist, not on their targets.
+    ConstraintSet with_dihedrals = optimizer.GetConstraints();
+    for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+        const std::vector<unsigned> atoms = options.GetDihedral(k);
+        with_dihedrals.AddDihedral(atoms[0], atoms[1], atoms[2], atoms[3], 0.0);
+    }
+    OptimizerOptions constrained = optimizer;
+    constrained.SetConstraints(with_dihedrals);
+    resolve_optimizer_settings(constrained, settings_.preset, mol.NumAtoms(),
+                               capabilities_.force_field);
+    detail::check_constraint_atoms(with_dihedrals, mol);
+    CallState state = Prepare(mol);
+    const MolecularSystem& system = *state.system;
+    const ResolvedOptimizerSettings resolved_settings = resolve_optimizer_settings(
+        constrained, settings_.preset, system.NumAtoms(), capabilities_.force_field);
+    const detail::ScanGrid grid = detail::build_scan_grid(options);
+    // Spec 7.4: by default, 20 optimizations per grid point.
+    const std::size_t default_cap = std::min<std::size_t>(
+        detail::SCAN_OPTIMIZATIONS_PER_POINT * grid.Size(), std::numeric_limits<unsigned>::max());
+    const unsigned max_optimizations = options.HasMaxOptimizations()
+                                           ? options.GetMaxOptimizations()
+                                           : static_cast<unsigned>(default_cap);
+
+    std::vector<std::array<unsigned, 4>> dense_dihedrals;
+    for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+        const std::vector<unsigned> atoms = options.GetDihedral(k);
+        dense_dihedrals.push_back({system.GetDenseIndex(atoms[0]), system.GetDenseIndex(atoms[1]),
+                                   system.GetDenseIndex(atoms[2]), system.GetDenseIndex(atoms[3])});
+    }
+    // Spec 7.4: each input conformer, in order, seeds the point nearest its dihedral values.
+    std::vector<std::pair<std::size_t, std::vector<double>>> seeds;
+    for (unsigned position = 0; position < system.NumConformers(); ++position) {
+        const std::vector<double>& x = system.GetConformerCoordinates(position);
+        std::vector<double> angles;
+        for (const std::array<unsigned, 4>& atoms : dense_dihedrals) {
+            angles.push_back(
+                detail::dihedral(x.data(), atoms[0], atoms[1], atoms[2], atoms[3], nullptr) *
+                Units::RADIANS_TO_DEGREES);
+        }
+        seeds.emplace_back(grid.Nearest(angles), x);
+    }
+
+    // Spec 6.6 holds a constraint or restraint without a target at its starting value, and a
+    // position restraint at its starting position. A scan's optimizations start from many
+    // geometries, so those values come from the first input conformer for every grid point;
+    // taking them from each start would let them drift as the wavefront moves.
+    const std::vector<double>& reference_x = system.GetConformerCoordinates(0);
+    const detail::OptimizeAtPoint optimize = [&](std::size_t point,
+                                                 const std::vector<double>& start_x) {
+        detail::ScanAttempt attempt;
+        try {
+            ConstraintSet constraints = optimizer.GetConstraints();
+            const std::vector<double> angles = grid.Angles(point);
+            for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+                const std::vector<unsigned> atoms = options.GetDihedral(k);
+                constraints.AddDihedral(atoms[0], atoms[1], atoms[2], atoms[3], angles[k]);
+            }
+            // Spec 6.4: a fresh session for every grid-point optimization.
+            std::shared_ptr<EngineSession> session =
+                create_session(*engine_, engine_name_, system, settings_);
+            detail::OptimizationProblem problem;
+            problem.x0 = start_x;
+            problem.atomic_numbers = system.GetAtomicNumbers();
+            problem.constraints = detail::resolve_constraint_set(constraints, system, reference_x);
+            problem.settings = resolved_settings;
+            const detail::OptimizationOutcome outcome = detail::run_optimization(*session, problem);
+            attempt.has_energy = true;
+            attempt.energy = outcome.engine_energy;
+            attempt.converged = outcome.converged;
+            attempt.x = outcome.x;
+            attempt.message = outcome.converged ? "" : outcome.message;
+        } catch (const UnsupportedError& e) {
+            attempt = detail::ScanAttempt();
+            attempt.unsupported = true;
+            attempt.message = e.what();
+        } catch (const std::exception& e) {
+            // An OptimizationFailure carries the last iterate the optimizer accepted, but that
+            // geometry need not satisfy the grid constraints, so a failed attempt keeps no energy
+            // and no geometry however far the optimizer got. This is the only place that can
+            // enforce it: the wavefront ranks every attempt that reports an energy.
+            attempt = detail::ScanAttempt();
+            attempt.has_energy = false;
+            attempt.message = e.what();
+        }
+        return attempt;
+    };
+    const detail::WavefrontResult wavefront =
+        detail::run_wavefront(grid, seeds, max_optimizations, optimize);
+
+    std::map<std::string, std::string> resolved = CallResolvedOptions(state, "scan");
+    const ConstraintSet& constraints = optimizer.GetConstraints();
+    resolved["optimizer.algorithm"] = algorithm_name(resolved_settings.algorithm);
+    resolved["optimizer.max_iterations"] = std::to_string(resolved_settings.max_iterations);
+    resolved["optimizer.energy_change"] = detail::format_value(resolved_settings.energy_change);
+    resolved["optimizer.gradient_norm"] = detail::format_value(resolved_settings.gradient_norm);
+    resolved["optimizer.initial_trust_radius"] =
+        detail::format_value(resolved_settings.initial_trust_radius);
+    resolved["optimizer.max_trust_radius"] =
+        detail::format_value(resolved_settings.max_trust_radius);
+    resolved["optimizer.frozen_atoms"] = encode_indices(constraints.GetFrozenAtoms());
+    resolved["optimizer.constraints"] = encode_constraints(constraints.GetConstraints());
+    resolved["optimizer.restraints"] = encode_restraints(constraints.GetRestraints());
+    std::string dihedrals;
+    for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+        dihedrals += (k == 0 ? "" : ";") + encode_indices(options.GetDihedral(k));
+    }
+    resolved["scan.dihedrals"] = dihedrals;
+    resolved["scan.step"] = detail::format_value(options.GetStep());
+    resolved["scan.range_start"] = detail::format_value(options.GetRangeStart());
+    resolved["scan.range_end"] = detail::format_value(options.GetRangeEnd());
+    resolved["scan.max_optimizations"] = std::to_string(max_optimizations);
+
+    // NewResult assembles the provenance and the call's warnings exactly as every other task
+    // records them; a scan has no per-conformer results, so it borrows one.
+    const ConformerResult call = NewResult(state, 0, resolved);
+    ScanResult result;
+    result.SetProvenance(call.GetProvenance());
+    for (const std::string& warning : call.GetWarnings()) {
+        result.AddWarning(warning);
+    }
+    for (unsigned k = 0; k < options.GetNumDihedrals(); ++k) {
+        result.AddDihedral(options.GetDihedral(k));
+    }
+    result.SetMolecule(
+        mol, "OEVibe." + settings_.method.GetName() + "." + settings_.solvent.GetTag() + ".");
+    std::size_t without_energy = 0;
+    for (std::size_t index = 0; index < grid.Size(); ++index) {
+        const detail::WavefrontPoint& visited = wavefront.points[index];
+        ScanPoint point;
+        point.SetAngles(grid.Angles(index));
+        // Spec 7.5 scan-point statuses.
+        if (visited.has_best) {
+            point.SetEnergy(visited.best.energy);
+            point.SetCoordinates(system.ToOELayout(visited.best.x));
+            point.SetStatus(
+                visited.best.converged ? ScanPointStatus::OK : ScanPointStatus::NOT_CONVERGED,
+                visited.best.message);
+        } else if (visited.attempts == 0) {
+            ++without_energy;
+            point.SetStatus(ScanPointStatus::NOT_ATTEMPTED,
+                            wavefront.truncated ? "the optimization cap was reached first"
+                                                : "propagation never reached this point");
+        } else {
+            ++without_energy;
+            point.SetStatus(visited.any_unsupported ? ScanPointStatus::UNSUPPORTED
+                                                    : ScanPointStatus::ENGINE_ERROR,
+                            visited.last_message);
+        }
+        result.AddPoint(std::move(point));
+    }
+    if (wavefront.truncated) {
+        result.SetTruncated(true);
+        result.AddWarning("the scan stopped at its cap of " + std::to_string(max_optimizations) +
+                          " optimizations before propagation finished; " +
+                          std::to_string(without_energy) + " of " + std::to_string(grid.Size()) +
+                          " grid points have no energy");
+    }
+    result.Finalize();
+    return result;
 }
 
 }  // namespace OEVIBE
