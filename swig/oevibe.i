@@ -545,7 +545,9 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %pythonappend OEVIBE::ConformerResult::GetOptimizationStats %{ val._parent = self %}
 %pythonappend OEVIBE::ConformerResult::GetProvenance %{ val._parent = self %}
 %pythonappend OEVIBE::ConformerResult::GetTimings %{ val._parent = self %}
+%pythonappend OEVIBE::ConformerResult::GetThermochemistry %{ val._parent = self %}
 %pythonappend OEVIBE::OptimizerOptions::GetConstraints %{ val._parent = self %}
+%pythonappend OEVIBE::ThermoOptions::GetOptimizerOptions %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetMethod %{ val._parent = self %}
 %pythonappend OEVIBE::CalculationOptions::GetSolvent %{ val._parent = self %}
 
@@ -603,7 +605,10 @@ same molecule must not be passed to calculations from more than one thread at a 
 %include "oevibe/Constraints.h"
 %include "oevibe/Options.h"
 // The member variables of the result structs are filled in C++, and Python receives them as
-// views into a result, so they are exposed without setters.
+// views into a result, so they are exposed without setters. A vector member would otherwise be
+// returned as a mutable DoubleVector view into the result; %naturalvar returns a tuple copy.
+%naturalvar OEVIBE::Thermochemistry::frequencies;
+%naturalvar OEVIBE::Thermochemistry::principal_moments;
 %immutable;
 %include "oevibe/Result.h"
 %mutable;
