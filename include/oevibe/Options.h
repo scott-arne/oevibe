@@ -152,6 +152,41 @@ private:
     ConstraintSet constraints_;
 };
 
+/// Frequency and thermochemistry options (spec 5.5, 7.3). The optimizer options drive the
+/// optional preliminary optimization; their unset fields come from the calculation's preset.
+class ThermoOptions {
+public:
+    double GetTemperature() const;
+    /// :raises OptionsError: Unless finite and greater than 0 (K). Default 298.15.
+    void SetTemperature(double kelvin);
+    double GetPressure() const;
+    /// :raises OptionsError: Unless finite and greater than 0 (atm). Default 1.
+    void SetPressure(double atm);
+    double GetQuasiRRHOCutoff() const;
+    /// :raises OptionsError: Unless finite and greater than 0 (cm^-1). Default 100.
+    void SetQuasiRRHOCutoff(double cm);
+    unsigned GetSymmetryNumber() const;
+    /// :raises OptionsError: When 0. Default 1; point groups are not detected (spec 7.3).
+    void SetSymmetryNumber(unsigned n);
+    bool GetOptimizeFirst() const;
+    /// Default true: optimize, then compute the Hessian at the optimized geometry.
+    void SetOptimizeFirst(bool optimize);
+    const OptimizerOptions& GetOptimizerOptions() const;
+    void SetOptimizerOptions(const OptimizerOptions& options);
+
+    /// :raises OptionsError: When the optimizer options fail Validate() or contain any
+    ///     frozen atom, constraint, or restraint (frequencies need a stationary point).
+    void Validate() const;
+
+private:
+    double temperature_ = 298.15;
+    double pressure_ = 1.0;
+    double quasi_rrho_cutoff_ = 100.0;
+    unsigned symmetry_number_ = 1;
+    bool optimize_first_ = true;
+    OptimizerOptions optimizer_;
+};
+
 /// Optimizer settings after the spec 5.4 resolution rule; ``algorithm`` is never AUTO.
 struct ResolvedOptimizerSettings {
     Algorithm algorithm = Algorithm::ANC_RFO;

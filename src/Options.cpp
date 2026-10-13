@@ -215,6 +215,40 @@ void OptimizerOptions::Validate() const {
     }
 }
 
+// ThermoOptions
+
+double ThermoOptions::GetTemperature() const { return temperature_; }
+void ThermoOptions::SetTemperature(double kelvin) {
+    require_positive(kelvin, "Temperature");
+    temperature_ = kelvin;
+}
+double ThermoOptions::GetPressure() const { return pressure_; }
+void ThermoOptions::SetPressure(double atm) {
+    require_positive(atm, "Pressure");
+    pressure_ = atm;
+}
+double ThermoOptions::GetQuasiRRHOCutoff() const { return quasi_rrho_cutoff_; }
+void ThermoOptions::SetQuasiRRHOCutoff(double cm) {
+    require_positive(cm, "QuasiRRHOCutoff");
+    quasi_rrho_cutoff_ = cm;
+}
+unsigned ThermoOptions::GetSymmetryNumber() const { return symmetry_number_; }
+void ThermoOptions::SetSymmetryNumber(unsigned n) {
+    require(n >= 1, "SymmetryNumber must be at least 1");
+    symmetry_number_ = n;
+}
+bool ThermoOptions::GetOptimizeFirst() const { return optimize_first_; }
+void ThermoOptions::SetOptimizeFirst(bool optimize) { optimize_first_ = optimize; }
+const OptimizerOptions& ThermoOptions::GetOptimizerOptions() const { return optimizer_; }
+void ThermoOptions::SetOptimizerOptions(const OptimizerOptions& options) { optimizer_ = options; }
+
+void ThermoOptions::Validate() const {
+    optimizer_.Validate();
+    require(optimizer_.GetConstraints().IsEmpty(),
+            "frequencies need an unconstrained stationary point, so the optimizer options must "
+            "not freeze atoms or hold constraints or restraints");
+}
+
 ResolvedOptimizerSettings resolve_optimizer_settings(const OptimizerOptions& options, Preset preset,
                                                      unsigned num_atoms, bool force_field_method) {
     options.Validate();

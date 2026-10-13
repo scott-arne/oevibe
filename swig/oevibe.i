@@ -525,6 +525,9 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
 %ignore OEVIBE::ConformerResult::SetDipole;
 %ignore OEVIBE::ConformerResult::SetOrbitalEnergies;
 %ignore OEVIBE::ConformerResult::SetBondOrders;
+%ignore OEVIBE::ConformerResult::SetHessian;
+%ignore OEVIBE::ConformerResult::SetFrequencies;
+%ignore OEVIBE::ConformerResult::SetThermochemistry;
 %ignore OEVIBE::ConformerResult::SetOptimizationStats;
 %ignore OEVIBE::ConformerResult::SetProvenance;
 %ignore OEVIBE::ConformerResult::SetTimings;

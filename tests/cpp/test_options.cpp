@@ -143,3 +143,67 @@ TEST(ResolveOptimizerTest, InconsistentTrustRadiiAfterResolution) {
     opts.SetInitialTrustRadius(0.5);
     EXPECT_THROW(resolve_optimizer_settings(opts, Preset::STANDARD, 10, false), OptionsError);
 }
+
+TEST(ThermoOptionsTest, DefaultsMatchSpec) {
+    const ThermoOptions opts;
+    EXPECT_DOUBLE_EQ(opts.GetTemperature(), 298.15);
+    EXPECT_DOUBLE_EQ(opts.GetPressure(), 1.0);
+    EXPECT_DOUBLE_EQ(opts.GetQuasiRRHOCutoff(), 100.0);
+    EXPECT_EQ(opts.GetSymmetryNumber(), 1u);
+    EXPECT_TRUE(opts.GetOptimizeFirst());
+    EXPECT_TRUE(opts.GetOptimizerOptions().GetConstraints().IsEmpty());
+    EXPECT_NO_THROW(opts.Validate());
+}
+
+TEST(ThermoOptionsTest, SettersValidate) {
+    ThermoOptions opts;
+    const double infinity = std::numeric_limits<double>::infinity();
+    for (double bad : {0.0, -1.0, NAN_VALUE, infinity}) {
+        EXPECT_THROW(opts.SetTemperature(bad), OptionsError);
+        EXPECT_THROW(opts.SetPressure(bad), OptionsError);
+        EXPECT_THROW(opts.SetQuasiRRHOCutoff(bad), OptionsError);
+    }
+    EXPECT_THROW(opts.SetSymmetryNumber(0), OptionsError);
+    opts.SetTemperature(310.0);
+    opts.SetPressure(2.0);
+    opts.SetQuasiRRHOCutoff(50.0);
+    opts.SetSymmetryNumber(2);
+    opts.SetOptimizeFirst(false);
+    EXPECT_DOUBLE_EQ(opts.GetTemperature(), 310.0);
+    EXPECT_DOUBLE_EQ(opts.GetPressure(), 2.0);
+    EXPECT_DOUBLE_EQ(opts.GetQuasiRRHOCutoff(), 50.0);
+    EXPECT_EQ(opts.GetSymmetryNumber(), 2u);
+    EXPECT_FALSE(opts.GetOptimizeFirst());
+}
+
+TEST(ThermoOptionsTest, ValidateRejectsConstraintsAndInvalidOptimizerOptions) {
+    const auto with = [](const ConstraintSet& constraints) {
+        OptimizerOptions optimizer;
+        optimizer.SetConstraints(constraints);
+        ThermoOptions opts;
+        opts.SetOptimizerOptions(optimizer);
+        return opts;
+    };
+    ConstraintSet frozen;
+    frozen.FreezeAtomIndices({0});
+    EXPECT_THROW(with(frozen).Validate(), OptionsError);
+    ConstraintSet exact;
+    exact.AddDistance(0, 1);
+    EXPECT_THROW(with(exact).Validate(), OptionsError);
+    ConstraintSet restrained;
+    restrained.AddDistanceRestraint(0, 1, 10.0);
+    EXPECT_THROW(with(restrained).Validate(), OptionsError);
+
+    OptimizerOptions radii;
+    radii.SetInitialTrustRadius(0.5);
+    radii.SetMaxTrustRadius(0.2);
+    ThermoOptions opts;
+    opts.SetOptimizerOptions(radii);
+    EXPECT_THROW(opts.Validate(), OptionsError);
+
+    OptimizerOptions limited;
+    limited.SetMaxIterations(50);
+    opts.SetOptimizerOptions(limited);
+    EXPECT_NO_THROW(opts.Validate());
+    EXPECT_EQ(opts.GetOptimizerOptions().GetMaxIterations(), 50u);
+}

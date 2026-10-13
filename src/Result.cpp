@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 
+#include "core/Thermochemistry.h"
 #include "oevibe/Error.h"
 #include "oevibe/Units.h"
 
@@ -147,6 +148,61 @@ void ConformerResult::SetBondOrders(const std::vector<BondOrder>& orders) {
     }
     bond_orders_ = stored;
 }
+bool ConformerResult::HasHessian() const { return hessian_.has_value(); }
+std::vector<double> ConformerResult::GetHessian() const {
+    return require_value(hessian_, "Hessian");
+}
+void ConformerResult::SetHessian(const std::vector<double>& hessian) {
+    const auto dim =
+        static_cast<std::size_t>(std::llround(std::sqrt(static_cast<double>(hessian.size()))));
+    if (hessian.empty() || dim * dim != hessian.size() || dim % 3 != 0) {
+        throw OEVibeError("a Hessian needs (3N)^2 values, got " + std::to_string(hessian.size()));
+    }
+    hessian_ = hessian;
+}
+bool ConformerResult::HasFrequencies() const { return frequencies_.has_value(); }
+std::vector<double> ConformerResult::GetFrequencies() const {
+    return require_value(frequencies_, "frequencies");
+}
+std::vector<double> ConformerResult::GetNormalModes() const {
+    require_value(frequencies_, "normal modes");
+    return normal_modes_;
+}
+unsigned ConformerResult::GetImaginaryModeCount() const {
+    require_value(frequencies_, "imaginary-mode count");
+    return imaginary_count_;
+}
+void ConformerResult::SetFrequencies(const std::vector<double>& frequencies,
+                                     const std::vector<double>& normal_modes,
+                                     unsigned imaginary_count) {
+    const bool shaped = frequencies.empty()
+                            ? normal_modes.empty()
+                            : normal_modes.size() % frequencies.size() == 0 &&
+                                  (normal_modes.size() / frequencies.size()) % 3 == 0 &&
+                                  !normal_modes.empty();
+    if (!shaped) {
+        throw OEVibeError("normal modes must hold one row of 3N values per frequency; got " +
+                          std::to_string(normal_modes.size()) + " values for " +
+                          std::to_string(frequencies.size()) + " frequencies");
+    }
+    const auto negative = static_cast<unsigned>(
+        std::count_if(frequencies.begin(), frequencies.end(), [](double f) { return f < 0.0; }));
+    if (imaginary_count != negative) {
+        throw OEVibeError("the imaginary-mode count " + std::to_string(imaginary_count) +
+                          " differs from the " + std::to_string(negative) +
+                          " negative frequencies");
+    }
+    frequencies_ = frequencies;
+    normal_modes_ = normal_modes;
+    imaginary_count_ = imaginary_count;
+}
+bool ConformerResult::HasThermochemistry() const { return thermochemistry_.has_value(); }
+const Thermochemistry& ConformerResult::GetThermochemistry() const {
+    return require_value(thermochemistry_, "thermochemistry");
+}
+void ConformerResult::SetThermochemistry(const Thermochemistry& thermochemistry) {
+    thermochemistry_ = thermochemistry;
+}
 bool ConformerResult::HasOptimizationStats() const { return optimization_stats_.has_value(); }
 const OptimizationStats& ConformerResult::GetOptimizationStats() const {
     return require_value(optimization_stats_, "optimization statistics");
@@ -236,19 +292,39 @@ std::map<unsigned, double> ResultSet::GetBoltzmannWeights(double temperature) co
         throw OEVibeError("temperature must be finite and greater than 0 K");
     }
     RequireComparable();
-    std::map<unsigned, double> weights;
-    if (!HasLowest()) {
-        return weights;
-    }
-    const double minimum = GetLowest().GetEnergy();
-    const double rt = Units::GAS_CONSTANT_KCAL * temperature;
-    double total = 0.0;
+    std::vector<const ConformerResult*> ok;
     for (const ConformerResult& result : results_) {
         if (result.GetStatus() == ConformerStatus::OK && result.HasEnergy()) {
-            const double weight = std::exp(-(result.GetEnergy() - minimum) / rt);
-            weights[result.GetConformerIndex()] = weight;
-            total += weight;
+            ok.push_back(&result);
         }
+    }
+    const auto with_thermochemistry = static_cast<std::size_t>(
+        std::count_if(ok.begin(), ok.end(),
+                      [](const ConformerResult* result) { return result->HasThermochemistry(); }));
+    if (with_thermochemistry != 0 && with_thermochemistry != ok.size()) {
+        throw OEVibeError("cannot weight a mix of conformers with and without thermochemistry (" +
+                          std::to_string(with_thermochemistry) + " of " +
+                          std::to_string(ok.size()) + " OK conformers have it)");
+    }
+    std::map<unsigned, double> weights;
+    if (ok.empty()) {
+        return weights;
+    }
+    // X_i of spec 5.7 in kcal/mol: free energies at this temperature, or electronic energies.
+    std::vector<double> values;
+    for (const ConformerResult* result : ok) {
+        values.push_back(with_thermochemistry == 0 ? result->GetEnergy()
+                                                   : detail::recompute_thermochemistry(
+                                                         result->GetThermochemistry(), temperature)
+                                                         .free_energy);
+    }
+    const double minimum = *std::min_element(values.begin(), values.end());
+    const double rt = Units::GAS_CONSTANT_KCAL * temperature;
+    double total = 0.0;
+    for (std::size_t k = 0; k < ok.size(); ++k) {
+        const double weight = std::exp(-(values[k] - minimum) / rt);
+        weights[ok[k]->GetConformerIndex()] = weight;
+        total += weight;
     }
     for (auto& [index, weight] : weights) {
         weight /= total;

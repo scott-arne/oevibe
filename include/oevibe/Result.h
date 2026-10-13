@@ -76,8 +76,10 @@ struct Thermochemistry {
     double quasi_rrho_cutoff = 100.0;  ///< cm^-1
 };
 
-/// One conformer's result. Atom-indexed arrays use the OpenEye layout (spec 3.1). Absent
-/// values throw ``OEVibeError`` from their getters.
+/// One conformer's result. Atom-indexed arrays use the OpenEye layout (spec 3.1), except the
+/// Hessian and normal modes, which are dense arrays: entry 3 i + k belongs to the atom whose
+/// OpenEye index is ``GetAtomIndices()[i]``. Absent values throw ``OEVibeError`` from their
+/// getters.
 class ConformerResult {
 public:
     unsigned GetConformerIndex() const;
@@ -126,6 +128,24 @@ public:
     double GetBondOrder(unsigned oe_a, unsigned oe_b) const;
     double GetBondOrder(const OEChem::OEBondBase& bond) const;
     void SetBondOrders(const std::vector<BondOrder>& orders);
+    bool HasHessian() const;
+    /// :returns: 9N^2 values, row-major, kcal/mol/Angstrom^2, dense order.
+    std::vector<double> GetHessian() const;
+    /// :raises OEVibeError: Unless the size is (3N)^2 for some N >= 1.
+    void SetHessian(const std::vector<double>& hessian);
+    bool HasFrequencies() const;
+    /// :returns: cm^-1, ascending, imaginary modes negative.
+    std::vector<double> GetFrequencies() const;
+    /// :returns: One row of 3N Cartesian displacements per frequency, unit norm, dense order.
+    std::vector<double> GetNormalModes() const;
+    unsigned GetImaginaryModeCount() const;
+    /// :raises OEVibeError: Unless every mode has the same length, a multiple of 3, and
+    ///     ``imaginary_count`` equals the number of negative frequencies.
+    void SetFrequencies(const std::vector<double>& frequencies,
+                        const std::vector<double>& normal_modes, unsigned imaginary_count);
+    bool HasThermochemistry() const;
+    const Thermochemistry& GetThermochemistry() const;
+    void SetThermochemistry(const Thermochemistry& thermochemistry);
     bool HasOptimizationStats() const;
     const OptimizationStats& GetOptimizationStats() const;
     void SetOptimizationStats(const OptimizationStats& stats);
@@ -149,6 +169,11 @@ private:
     std::optional<std::vector<double>> orbital_energies_;
     int homo_index_ = -1;
     std::optional<std::map<std::pair<unsigned, unsigned>, double>> bond_orders_;
+    std::optional<std::vector<double>> hessian_;
+    std::optional<std::vector<double>> frequencies_;
+    std::vector<double> normal_modes_;  // Meaningful only while frequencies_ is set.
+    unsigned imaginary_count_ = 0;
+    std::optional<Thermochemistry> thermochemistry_;
     std::optional<OptimizationStats> optimization_stats_;
     Provenance provenance_;
     Timings timings_;
@@ -167,11 +192,13 @@ public:
     const ConformerResult& GetLowest() const;
     /// :returns: Conformer index to relative energy (kcal/mol) over OK conformers.
     std::map<unsigned, double> GetRelativeEnergies() const;
-    /// Weights over OK conformers from electronic energies,
-    /// w_i = exp(-(E_i - E_min) / RT) / sum_j exp(-(E_j - E_min) / RT). Plan B adds free
-    /// energies when thermochemistry is present.
-    /// :raises OEVibeError: Unless the temperature is finite and greater than 0, or when OK
-    ///     conformers have different methods, solvent models, or solvents (spec 9, 10).
+    /// Weights over OK conformers, w_i = exp(-(X_i - X_min) / RT) / sum_j exp(-(X_j - X_min) / RT)
+    /// (spec 5.7). When every OK conformer has thermochemistry, X is its free energy recomputed
+    /// at ``temperature`` (keeping its stored pressure); when none has it, X is the electronic
+    /// energy. No OK conformer gives an empty map.
+    /// :raises OEVibeError: Unless the temperature is finite and greater than 0; when only some
+    ///     OK conformers have thermochemistry; or when OK conformers have different methods,
+    ///     solvent models, or solvents (spec 9, 10).
     std::map<unsigned, double> GetBoltzmannWeights(double temperature) const;
 
     void Add(ConformerResult result);
