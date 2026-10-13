@@ -132,6 +132,7 @@ set(OEVIBE_SOURCES
     src/core/Hessian.cpp
     src/core/Frequencies.cpp
     src/core/Thermochemistry.cpp
+    src/core/ScanGrid.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})

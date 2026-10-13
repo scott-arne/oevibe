@@ -44,6 +44,7 @@ add_executable(oevibe_tests
     test_frequencies.cpp
     test_thermochemistry.cpp
     test_calculation_frequencies.cpp
+    test_scan_grid.cpp
 )
 
 target_link_libraries(oevibe_tests

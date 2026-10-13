@@ -4,6 +4,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "oevibe/Constraints.h"
 #include "oevibe/Method.h"
@@ -184,6 +185,52 @@ private:
     double quasi_rrho_cutoff_ = 100.0;
     unsigned symmetry_number_ = 1;
     bool optimize_first_ = true;
+    OptimizerOptions optimizer_;
+};
+
+/// Relaxed dihedral scan options (spec 5.5, 7.4). Each dihedral is four OpenEye atom indices; a
+/// 2D scan's two dihedrals share the step and the range. The optimizer options apply at every
+/// grid point, where the scanned dihedrals are added as exact constraints.
+class ScanOptions {
+public:
+    /// :raises OptionsError: For repeated atoms, a dihedral already added (in either
+    ///     direction), or a third dihedral.
+    void AddDihedral(unsigned a, unsigned b, unsigned c, unsigned d);
+    unsigned GetNumDihedrals() const;
+    /// :raises OptionsError: For an index past the end.
+    std::vector<unsigned> GetDihedral(unsigned index) const;
+    void ClearDihedrals();
+    double GetStep() const;
+    /// :raises OptionsError: Unless finite and greater than 0 (degrees).
+    void SetStep(double degrees);
+    double GetRangeStart() const;
+    double GetRangeEnd() const;
+    /// Degrees; the ends need not lie in (-180, 180], because grid angles are normalized.
+    /// :raises OptionsError: Unless both are finite.
+    void SetRange(double start, double end);
+    bool HasMaxOptimizations() const;
+    /// :raises OptionsError: When unset.
+    unsigned GetMaxOptimizations() const;
+    /// Caps the constrained optimizations of one scan; unset means 20 per grid point (spec 7.4).
+    /// :raises OptionsError: When 0.
+    void SetMaxOptimizations(unsigned count);
+    void ClearMaxOptimizations();
+    const OptimizerOptions& GetOptimizerOptions() const;
+    void SetOptimizerOptions(const OptimizerOptions& options);
+
+    /// :raises OptionsError: With no dihedral, end <= start, a range above 360 degrees, a step
+    ///     that does not divide the range, optimizer options that fail their own Validate() or
+    ///     select LBFGS (every scan has exact constraints, spec 7.1), or embedded constraints or
+    ///     restraints that already act on a scanned dihedral (the same four atoms in either
+    ///     direction).
+    void Validate() const;
+
+private:
+    std::vector<std::vector<unsigned>> dihedrals_;
+    double step_ = 15.0;
+    double range_start_ = -180.0;
+    double range_end_ = 180.0;
+    std::optional<unsigned> max_optimizations_;
     OptimizerOptions optimizer_;
 };
 
