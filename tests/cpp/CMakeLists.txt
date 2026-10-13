@@ -41,6 +41,7 @@ add_executable(oevibe_tests
     test_xtb_engine.cpp
     test_engine_integration.cpp
     test_hessian.cpp
+    test_frequencies.cpp
 )
 
 target_link_libraries(oevibe_tests
