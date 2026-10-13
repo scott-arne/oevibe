@@ -3,13 +3,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 
 #include "core/ConstraintMath.h"
+#include "core/Frequencies.h"
+#include "core/Hessian.h"
 #include "core/InputPrep.h"
 #include "core/Optimizer.h"
 #include "core/Sha256.h"
+#include "core/Thermochemistry.h"
 #include "core/WriteBack.h"
 #include "oevibe/EngineRegistry.h"
 #include "oevibe/Error.h"
@@ -457,6 +461,189 @@ ResultSet Calculation::Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& 
                 outcome.converged ? ConformerStatus::OK : ConformerStatus::NOT_CONVERGED,
                 outcome.converged ? "" : outcome.message);
         });
+}
+
+namespace {
+
+/// The stages of ``Calculation::Frequencies`` in order (spec 7.5).
+const char* const FREQUENCY_STAGES[] = {"optimization", "Hessian", "analysis"};
+
+/// Gives the conformer the stopping stage's status, with a message naming the stage, and records
+/// the later stages it skips as a warning (spec 7.5, 10).
+void stop_frequencies(ConformerResult& result, ConformerStatus status, const std::string& stage,
+                      const std::string& reason) {
+    result.SetStatus(status, stage + " stage: " + reason);
+    std::string skipped;
+    bool later = false;
+    for (const char* name : FREQUENCY_STAGES) {
+        if (later) {
+            skipped += (skipped.empty() ? "" : ", ") + std::string(name);
+        }
+        later = later || stage == name;
+    }
+    if (!skipped.empty()) {
+        result.AddWarning("the " + stage +
+                          " stage stopped, so these stages were skipped: " + skipped);
+    }
+}
+
+/// Runs one stage of ``Calculation::Frequencies``. An exception stops the conformer there: the
+/// values of completed stages stay (spec 7.5), an ENGINE_ERROR also keeps what the failed stage
+/// computed before failing, and an UNSUPPORTED stage keeps nothing of its own, as in single-stage
+/// tasks.
+/// :returns: Whether the stage completed.
+bool run_frequency_stage(ConformerResult& result, const std::string& stage,
+                         const std::function<void()>& work) {
+    const ConformerResult before = result;
+    try {
+        work();
+        return true;
+    } catch (const UnsupportedError& e) {
+        result = before;
+        stop_frequencies(result, ConformerStatus::UNSUPPORTED, stage, e.what());
+    } catch (const std::exception& e) {
+        stop_frequencies(result, ConformerStatus::ENGINE_ERROR, stage, e.what());
+    }
+    return false;
+}
+
+std::string imaginary_mode_warning(const detail::FrequencyAnalysis& analysis) {
+    const unsigned count = analysis.imaginary_count;
+    return std::to_string(count) + (count == 1 ? " imaginary mode" : " imaginary modes") +
+           " (lowest " + detail::format_value(analysis.frequencies.front()) +
+           " cm^-1): the geometry is not a minimum, and imaginary modes are left out of the ZPE "
+           "and thermal corrections";
+}
+
+}  // namespace
+
+ResultSet Calculation::Frequencies(OEChem::OEMolBase& mol, const ThermoOptions& options) {
+    const Clock::time_point call_start = Clock::now();
+    // Every option check runs before Prepare, which may add hydrogens to the caller's molecule.
+    // Resolving validates the optimizer options; its atom count only sets the default iteration
+    // limit, so the settings are resolved again for the prepared system below.
+    options.Validate();
+    const OptimizerOptions& optimizer = options.GetOptimizerOptions();
+    resolve_optimizer_settings(optimizer, settings_.preset, mol.NumAtoms(),
+                               capabilities_.force_field);
+    CallState state = Prepare(mol);
+    const MolecularSystem& system = *state.system;
+    const ResolvedOptimizerSettings resolved_settings = resolve_optimizer_settings(
+        optimizer, settings_.preset, system.NumAtoms(), capabilities_.force_field);
+    const bool optimize_first = options.GetOptimizeFirst();
+    // Spec 7.2: the engine's analytic Hessian when the method declares one.
+    const bool analytic = capabilities_.analytic_hessian;
+    const double step = preset_values(settings_.preset).fd_step;
+    const double setup_seconds = seconds_since(call_start);
+
+    std::map<std::string, std::string> resolved = CallResolvedOptions(state, "frequencies");
+    resolved["thermo.temperature"] = detail::format_value(options.GetTemperature());
+    resolved["thermo.pressure"] = detail::format_value(options.GetPressure());
+    resolved["thermo.quasi_rrho_cutoff"] = detail::format_value(options.GetQuasiRRHOCutoff());
+    resolved["thermo.symmetry_number"] = std::to_string(options.GetSymmetryNumber());
+    resolved["thermo.optimize_first"] = optimize_first ? "true" : "false";
+    resolved["hessian"] = analytic ? "analytic" : "finite_difference";
+    if (!analytic) {
+        resolved["hessian.step"] = detail::format_value(step);
+    }
+    // The optimizer settings change the results only when the optimization runs.
+    if (optimize_first) {
+        resolved["optimizer.algorithm"] = algorithm_name(resolved_settings.algorithm);
+        resolved["optimizer.max_iterations"] = std::to_string(resolved_settings.max_iterations);
+        resolved["optimizer.energy_change"] = detail::format_value(resolved_settings.energy_change);
+        resolved["optimizer.gradient_norm"] = detail::format_value(resolved_settings.gradient_norm);
+        resolved["optimizer.initial_trust_radius"] =
+            detail::format_value(resolved_settings.initial_trust_radius);
+        resolved["optimizer.max_trust_radius"] =
+            detail::format_value(resolved_settings.max_trust_radius);
+    }
+
+    const ConformerBody body = [&](ConformerResult& result, unsigned position) {
+        // One session serves the optimization and every Hessian displacement (spec 6.4).
+        std::shared_ptr<EngineSession> session;
+        std::vector<double> x = system.GetConformerCoordinates(position);
+        if (optimize_first) {
+            std::string not_converged;
+            const bool completed = run_frequency_stage(result, "optimization", [&] {
+                session = create_session(*engine_, engine_name_, system, settings_);
+                detail::OptimizationProblem problem;
+                problem.x0 = x;
+                problem.atomic_numbers = system.GetAtomicNumbers();
+                problem.settings = resolved_settings;
+                detail::OptimizationOutcome outcome;
+                try {
+                    outcome = detail::run_optimization(*session, problem);
+                } catch (const detail::OptimizationFailure& e) {
+                    // Spec 7.5: an engine failure keeps the values computed before it.
+                    if (e.HasPartialOutcome()) {
+                        const detail::OptimizationOutcome& partial = e.GetPartialOutcome();
+                        result.SetEnergy(partial.engine_energy);
+                        result.SetCoordinates(system.ToOELayout(partial.x));
+                        result.SetOptimizationStats(partial.stats);
+                    } else if (e.HasStartEnergy()) {
+                        result.SetEnergy(e.GetStartEnergy());
+                    }
+                    throw;
+                }
+                result.SetEnergy(outcome.engine_energy);
+                result.SetCoordinates(system.ToOELayout(outcome.x));
+                result.SetOptimizationStats(outcome.stats);
+                x = outcome.x;
+                if (!outcome.converged) {
+                    not_converged = outcome.message;
+                }
+            });
+            if (!completed) {
+                return;
+            }
+            if (!not_converged.empty()) {
+                stop_frequencies(result, ConformerStatus::NOT_CONVERGED, "optimization",
+                                 not_converged);
+                return;
+            }
+        }
+        std::vector<double> hessian;
+        const bool completed = run_frequency_stage(result, "Hessian", [&] {
+            if (!session) {
+                session = create_session(*engine_, engine_name_, system, settings_);
+            }
+            // Without an optimization the energy at the analyzed geometry is still unknown, and
+            // requested properties always come from that geometry.
+            if (!optimize_first || settings_.properties != 0) {
+                EvaluationRequest request;
+                request.properties = settings_.properties;
+                const Evaluation evaluation = session->Evaluate(x, request);
+                const std::string problem =
+                    validate_evaluation(evaluation, request, system.NumAtoms());
+                if (!problem.empty()) {
+                    throw std::runtime_error("engine returned a malformed Evaluation: " + problem);
+                }
+                apply_evaluation(result, evaluation, request, system);
+            }
+            hessian = detail::compute_hessian(*session, x, analytic, step);
+            result.SetHessian(hessian);
+        });
+        if (!completed) {
+            return;
+        }
+        run_frequency_stage(result, "analysis", [&] {
+            const detail::FrequencyAnalysis analysis =
+                detail::analyze_frequencies(hessian, x, system.GetAtomicNumbers());
+            result.SetFrequencies(analysis.frequencies, analysis.normal_modes,
+                                  analysis.imaginary_count);
+            result.SetThermochemistry(detail::compute_thermochemistry(
+                result.GetEnergy(), analysis.frequencies, analysis.principal_moments,
+                analysis.total_mass, options.GetSymmetryNumber(), analysis.linear,
+                system.GetMultiplicity(), options.GetTemperature(), options.GetPressure(),
+                options.GetQuasiRRHOCutoff()));
+            // Spec 7.3: imaginary modes are a warning; the status stays OK.
+            if (analysis.imaginary_count > 0) {
+                result.AddWarning(imaginary_mode_warning(analysis));
+            }
+            result.SetStatus(ConformerStatus::OK, "");
+        });
+    };
+    return RunConformers(mol, state, resolved, call_start, setup_seconds, optimize_first, body);
 }
 
 }  // namespace OEVIBE

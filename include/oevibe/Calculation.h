@@ -33,6 +33,14 @@ public:
     /// :raises InputError: When the molecule fails validation or a constraint names an atom
     ///     that is not in the molecule; nothing runs then.
     ResultSet Optimize(OEChem::OEMolBase& mol, const OptimizerOptions& options);
+    /// Frequencies and thermochemistry for every conformer (spec 7.2, 7.3): an optional
+    /// optimization, the Hessian, and the analysis, in one session per conformer (spec 6.4).
+    /// A stage that stops gives the conformer its status and skips the later stages (spec 7.5).
+    /// With ``SetOptimizeFirst(true)`` final coordinates are written back unless disabled.
+    /// :raises OptionsError: When the thermo options or their optimizer options are invalid,
+    ///     including any frozen atom, constraint, or restraint.
+    /// :raises InputError: When the molecule fails validation; nothing runs then.
+    ResultSet Frequencies(OEChem::OEMolBase& mol, const ThermoOptions& options);
 
     const CalculationOptions& GetOptions() const;
     const std::string& GetEngineName() const;
