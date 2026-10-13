@@ -133,6 +133,7 @@ set(OEVIBE_SOURCES
     src/core/Frequencies.cpp
     src/core/Thermochemistry.cpp
     src/core/ScanGrid.cpp
+    src/core/Wavefront.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
