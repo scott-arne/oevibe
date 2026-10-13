@@ -278,7 +278,7 @@ def frequencies(
     return _core.Calculation(options).Frequencies(mol, thermo)
 
 
-def _dihedral_indices(dihedral: Any) -> list[int]:
+def _dihedral_indices(dihedral: Any, mol: Any) -> list[int]:
     from openeye import oechem
 
     if isinstance(dihedral, str | bytes):
@@ -298,6 +298,13 @@ def _dihedral_indices(dihedral: Any) -> list[int]:
     indices = []
     for item in items:
         if isinstance(item, oechem.OEAtomBase):
+            # A handle reduces to an index local to its molecule, so one from another molecule
+            # would silently select whichever atom here has that index.
+            own = mol.GetAtom(oechem.OEHasAtomIdx(item.GetIdx()))
+            if own is None or own != item:
+                raise _core.InputError(
+                    f"dihedral atom {item.GetIdx()} does not belong to the scanned molecule"
+                )
             indices.append(int(item.GetIdx()))
         elif isinstance(item, numbers.Integral) and not isinstance(item, bool):
             indices.append(_checked_int("dihedral atom index", item, 0, _UNSIGNED_MAX))
@@ -319,6 +326,14 @@ def _angle_range(value: Any) -> tuple[float, float]:
         _checked_float("angle_range start", start),
         _checked_float("angle_range end", end),
     )
+
+
+def _optimization_cap(value: Any) -> int:
+    # _checked_int would truncate 1.5 and True to 1 and let a string or a non-finite float raise
+    # ValueError or OverflowError, so the cap must already be an integer here.
+    if not isinstance(value, numbers.Integral) or isinstance(value, bool):
+        raise _core.OptionsError(f"max_optimizations must be an integer, got {value!r}")
+    return _checked_int("max_optimizations", value, 1, _UNSIGNED_MAX)
 
 
 def scan(
@@ -348,7 +363,8 @@ def scan(
     not pass the same molecule to calculations on more than one thread at a time.
 
     :param dihedrals: One or two dihedrals, each four ``OEAtomBase`` objects or four OpenEye atom
-        indices.
+        indices. Atom objects must belong to ``mol`` itself (or one of its conformers); atoms of
+        a copy are another molecule's, so pass indices for those.
     :param step: Grid step in degrees; it must divide the range.
     :param angle_range: ``(start, end)`` in degrees, at most 360 apart. A range of exactly 360
         degrees gives a periodic grid from ``start + step`` to ``end``; any other includes both
@@ -356,7 +372,8 @@ def scan(
     :param max_optimizations: Caps the constrained optimizations; by default 20 per grid point.
     :returns: A :class:`ScanResult`.
     :raises OptionsError: For invalid dihedrals, scan options, or calculation options.
-    :raises InputError: When the molecule fails validation or a dihedral atom is not in it.
+    :raises InputError: When the molecule fails validation, a dihedral atom index is not in it,
+        or a dihedral atom object belongs to another molecule.
     """
     options = _calculation_options(
         method, solvent, engine, preset, properties, charge, multiplicity, keywords
@@ -373,11 +390,9 @@ def scan(
         ) from None
     scan_options = _core.ScanOptions()
     for dihedral in dihedral_list:
-        scan_options.AddDihedral(*_dihedral_indices(dihedral))
+        scan_options.AddDihedral(*_dihedral_indices(dihedral, mol))
     scan_options.SetStep(_checked_float("step", step))
     scan_options.SetRange(*_angle_range(angle_range))
     if max_optimizations is not None:
-        scan_options.SetMaxOptimizations(
-            _checked_int("max_optimizations", max_optimizations, 1, _UNSIGNED_MAX)
-        )
+        scan_options.SetMaxOptimizations(_optimization_cap(max_optimizations))
     return _core.Calculation(options).Scan(mol, scan_options)

@@ -356,8 +356,8 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 // wrapper-generating directive. Plan A engines are native C++ and never call back into Python,
 // so releasing the GIL around a calculation is safe. The constructor keeps the GIL: it copies
 // the caller's CalculationOptions, which another Python thread could be editing, and it only
-// validates, so there is no calculation to overlap with. Optimize and Frequencies read their
-// options for the whole run, so their wrappers copy them while the GIL is still held (the
+// validates, so there is no calculation to overlap with. Optimize, Frequencies, and Scan read
+// their options for the whole run, so their wrappers copy them while the GIL is still held (the
 // typemaps before Calculation.h below).
 %feature("nothreadallow", "1");
 %threadallow OEVIBE::Calculation::Energy;
@@ -640,11 +640,11 @@ than one thread at a time."
 %immutable;
 %include "oevibe/Result.h"
 %mutable;
-// Optimize and Frequencies run with the GIL released and read their options throughout, so the
-// wrappers convert them into private copies first; argument conversion runs before the GIL is
-// released, so no other Python thread can edit the caller's object mid-copy or mid-run. The
-// typemaps are cleared after Calculation.h so no other function with an ``options`` parameter
-// picks them up.
+// Optimize, Frequencies, and Scan run with the GIL released and read their options throughout,
+// so the wrappers convert them into private copies first; argument conversion runs before the
+// GIL is released, so no other Python thread can edit the caller's object mid-copy or mid-run.
+// The typemaps are cleared after Calculation.h so no other function with an ``options``
+// parameter picks them up.
 %typemap(in) const OEVIBE::OptimizerOptions& options
     (void *argp = 0, int res = 0, OEVIBE::OptimizerOptions snapshot) {
     res = SWIG_ConvertPtr($input, &argp, $descriptor, 0);

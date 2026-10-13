@@ -174,6 +174,11 @@ def test_scan_options_work_through_calculation(anti_butane):
         ([(0, 1, 2, 3)], {"angle_range": (-180.0, 200.0)}),
         ([(0, 1, 2, 3)], {"angle_range": (0.0,)}),
         ([(0, 1, 2, 3)], {"max_optimizations": 0}),
+        ([(0, 1, 2, 3)], {"max_optimizations": 1.5}),
+        ([(0, 1, 2, 3)], {"max_optimizations": True}),
+        ([(0, 1, 2, 3)], {"max_optimizations": "three"}),
+        ([(0, 1, 2, 3)], {"max_optimizations": float("inf")}),
+        ([(0, 1, 2, 3)], {"max_optimizations": float("nan")}),
         (5, {}),
         ([(0, 1, 2, 3)], {"step": "fifteen"}),
         ([(0, 1, 2, 3)], {"step": None}),
@@ -189,6 +194,26 @@ def test_invalid_options_raise_options_error(anti_butane, dihedrals, kwargs):
 def test_missing_atoms_raise_input_error(anti_butane):
     with pytest.raises(oevibe.InputError):
         oevibe.scan(anti_butane, [(0, 1, 2, 99)], method="mmff94")
+
+
+def test_atoms_of_another_molecule_raise_input_error(anti_butane, butanol_conformers):
+    foreign = _chain(butanol_conformers)[:4]
+    indices = [atom.GetIdx() for atom in foreign]
+    # An atom handle carries only an index local to its molecule, so these indices must also be
+    # valid here for the test to show that the handles are not just read as indices.
+    assert max(indices) < anti_butane.NumAtoms()
+    by_indices = oevibe.scan(anti_butane, [indices], method="mmff94", step=120.0)
+    assert by_indices.GetNumPoints() == 3
+    with pytest.raises(oevibe.InputError, match="does not belong"):
+        oevibe.scan(anti_butane, [foreign], method="mmff94", step=120.0)
+
+
+def test_atoms_of_a_conformer_belong_to_the_molecule(anti_butane):
+    conf = anti_butane.GetActive()
+    indices = _indices(anti_butane)
+    atoms = [conf.GetAtom(oechem.OEHasAtomIdx(index)) for index in indices]
+    scan = oevibe.scan(anti_butane, [atoms], method="mmff94", step=120.0)
+    assert list(scan.GetDihedral(0)) == indices
 
 
 def test_scan_results_are_read_only(anti_butane):
