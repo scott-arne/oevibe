@@ -40,6 +40,7 @@ add_executable(oevibe_tests
     test_electronic_properties.cpp
     test_xtb_engine.cpp
     test_engine_integration.cpp
+    test_hessian.cpp
 )
 
 target_link_libraries(oevibe_tests

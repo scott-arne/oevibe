@@ -129,6 +129,7 @@ set(OEVIBE_SOURCES
     src/engines/ElectronicProperties.cpp
     src/engines/XtbLibrary.cpp
     src/engines/XtbEngine.cpp
+    src/core/Hessian.cpp
 )
 
 add_library(oevibe ${OEVIBE_SOURCES})
