@@ -86,6 +86,18 @@ def test_results_are_read_only(butanol_conformers):
     assert thermo.zpe == zpe
 
 
+def test_thermochemistry_view_is_linked_to_its_owners(butanol_conformers):
+    # Reading a view after its owner is freed passes even when the link is missing, because freed
+    # memory is not reliably overwritten, so the chain that keeps each owner alive is asserted
+    # directly.
+    results = oevibe.frequencies(butanol_conformers, method="mmff94")
+    result = results[0]
+    thermo = result.GetThermochemistry()
+
+    assert thermo._parent is result
+    assert result._parent is results
+
+
 def test_tags_are_written(butanol_conformers):
     results = oevibe.frequencies(butanol_conformers, method="mmff94")
     for conf, result in zip(butanol_conformers.GetConfs(), results, strict=True):
