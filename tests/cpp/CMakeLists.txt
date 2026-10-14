@@ -25,6 +25,7 @@ add_executable(oevibe_tests
     test_engine_registry.cpp
     test_engine_resolution.cpp
     test_molfunc_engine.cpp
+    test_engine_molfunc.cpp
     test_oeff_engine.cpp
     test_result.cpp
     test_sha256.cpp
