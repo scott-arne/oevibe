@@ -26,9 +26,12 @@ That claimed name is also import-*form* dependent -- ``oeff`` or ``openeye.oeff`
 
 from __future__ import annotations
 
+import ctypes
 import importlib
 
-from .oevibe import OptionsError, _MolFuncEngine
+import numpy as np
+
+from .oevibe import OptionsError, _EngineMolFunc, _MolFuncEngine
 
 _OPENEYE_POTENTIAL_CLASSES: dict[str, frozenset[type]] = {}
 
@@ -261,3 +264,98 @@ def MolFuncEngine(name, version, method, potential, requires_partial_charges=Fal
     # ``del`` at the end of the frame would do nothing at all.
     upcast, _holder = _as_molfunc1(potential)
     return _MolFuncEngine(name, version, method, upcast, requires_partial_charges)
+
+
+def _buffer_view(buffer, count):
+    """:returns: A writable numpy view of ``count`` doubles, or None when ``buffer`` is a sequence.
+
+    ``OEBFGSOpt`` upcalls a Python potential with bare ``SwigPyObject``s wrapping ``double*``; they
+    expose no length and no indexing, only ``__int__``, which is the buffer address. A direct call
+    from Python instead passes an ``oechem.OEDoubleArray``, which is a sequence.
+    """
+    if hasattr(buffer, "__len__"):
+        return None
+    pointer = ctypes.cast(int(buffer), ctypes.POINTER(ctypes.c_double))
+    return np.ctypeslib.as_array(pointer, shape=(count,))
+
+
+def _read_doubles(buffer, count):
+    """:returns: ``count`` doubles from an OpenEye argument as a float64 array."""
+    view = _buffer_view(buffer, count)
+    if view is not None:
+        return view
+    return np.fromiter(
+        (buffer[index] for index in range(count)), dtype=np.float64, count=count
+    )
+
+
+def _accumulate(buffer, values):
+    """Adds ``values`` into an OpenEye output buffer, which OpenEye never expects to be cleared."""
+    view = _buffer_view(buffer, len(values))
+    if view is not None:
+        view += values
+        return
+    for index, value in enumerate(values):
+        buffer[index] += value
+
+
+def as_oemolfunc(options):
+    """OEVibe as an ``openeye.oeff.OEMolFunc1``, for OpenEye's optimizers (spec 8.8).
+
+    The returned object resolves and validates the engine at construction, builds its system and
+    session in ``Setup(mol)``, and reports energies in kcal/mol and gradients in
+    kcal/mol/Angstrom in the OpenEye layout of the molecule it was set up on.
+
+    :param options: An ``oevibe.CalculationOptions``.
+    :returns: An ``openeye.oeff.OEMolFunc1`` subclass instance.
+    :raises OptionsError: For invalid options or a method the engine does not provide.
+    :raises EngineUnavailableError: When the engine or the method is unavailable.
+    """
+    from openeye import oeff
+
+    from .engines import ensure_engines_loaded
+
+    # Resolving the engine is a registry query, and this one does not go through Calculation,
+    # so an entry-point engine would otherwise be invisible here (spec 8.7).
+    ensure_engines_loaded()
+
+    class _OEVibeMolFunc(oeff.OEMolFunc1):
+        """One OEVibe calculation presented to OpenEye. Not thread-safe; use one per thread.
+
+        It holds no reference to the caller's ``CalculationOptions``: the C++ ``EngineMolFunc``
+        copied them at construction, and ``CreateCopy`` goes through C++ so a copy inherits that
+        snapshot rather than re-reading a proxy the caller may have edited since.
+        """
+
+        def __init__(self, calculation_options=None, function=None):
+            oeff.OEMolFunc1.__init__(self)
+            self._function = (
+                function
+                if function is not None
+                else _EngineMolFunc(calculation_options)
+            )
+
+        def CreateCopy(self):
+            copy = _OEVibeMolFunc(function=self._function.CreateCopy())
+            # OpenEye takes ownership of a copy, so Python must stop owning it.
+            copy.__disown__()
+            return copy
+
+        def Setup(self, mol):
+            return self._function.Setup(mol)
+
+        def NumVar(self):
+            return self._function.NumVar()
+
+        def GetFComponents(self, coords):
+            return None
+
+        def __call__(self, *args):
+            count = self._function.NumVar()
+            coords = _read_doubles(args[0], count)
+            value = self._function.Evaluate(coords.tolist(), len(args) > 1)
+            if len(args) > 1:
+                _accumulate(args[1], np.asarray(value.gradient, dtype=np.float64))
+            return value.energy
+
+    return _OEVibeMolFunc(options)

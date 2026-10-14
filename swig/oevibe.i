@@ -1045,14 +1045,29 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 
 %include "oevibe/Constraints.h"
 %include "oevibe/Options.h"
-// EngineMolFunc is an OEMolPotential::OEMolFunc2 and could not be handed to OpenEye's Python
-// optimizers across the runtime boundary; oevibe.as_oemolfunc is the Python path (spec 8.8).
-%ignore OEVIBE::EngineMolFunc;
-// %ignore does not stop SWIG parsing the class, so it still reports the incomplete OpenEye base
-// (402) and the nested FunctionValue it would have dropped (325). Both are consequences of the
-// %ignore above, not of anything this module exports.
+// EngineMolFunc reaches Python only as the engine behind as_oemolfunc: its OEMolFunc2 base means
+// nothing across the runtime boundary, so the raw-pointer operators stay hidden and Python uses
+// the vector-based Evaluate (spec 8.8).
+//
+// 402 rather than 401: the module forward-declares OEMolPotential::OEMolFunc2 above, so SWIG
+// reports an incomplete base rather than an unknown one. Leaving that declaration out to get
+// 401 instead is not an option -- the cross-runtime typemaps need the name.
 %warnfilter(402) OEVIBE::EngineMolFunc;
-%warnfilter(325) OEVIBE::EngineMolFunc::FunctionValue;
+%rename("_EngineMolFunc") OEVIBE::EngineMolFunc;
+%ignore OEVIBE::EngineMolFunc::operator();
+%ignore OEVIBE::EngineMolFunc::GetFComponents;
+// CreateCopy stays wrapped: it is how as_oemolfunc copies a function without holding on to the
+// caller's mutable CalculationOptions. The C++ constructor already copied the options, so the
+// copy is insulated from anything the caller does to theirs afterwards. %newobject because the
+// returned pointer is a fresh heap object Python must own.
+%newobject OEVIBE::EngineMolFunc::CreateCopy;
+// SWIG's Python backend does not wrap nested classes (325). Left nested, Evaluate's by-value
+// return arrives as an opaque SwigPyObject with no attributes and no destructor -- every call
+// prints "no destructor found" and leaks the struct. Flattening gives it a real proxy; the name
+// is private because nothing outside as_oemolfunc has any use for it.
+%feature("flatnested") OEVIBE::EngineMolFunc::FunctionValue;
+%rename("_EngineMolFuncValue") OEVIBE::EngineMolFunc::FunctionValue;
+%naturalvar OEVIBE::EngineMolFunc::FunctionValue::gradient;
 // The Python factory oevibe.MolFuncEngine upcasts the potential before calling this; see the
 // OEMolFunc1 typemap above for why a direct call would be wrong.
 %rename("_MolFuncEngine") OEVIBE::MolFuncEngine;

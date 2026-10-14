@@ -571,7 +571,7 @@ from .engines import (
     ensure_engines_loaded,
     register_engine,
 )
-from .oemolfunc import MolFuncEngine
+from .oemolfunc import MolFuncEngine, as_oemolfunc
 from .oevibe import (
     Algorithm,
     BondOrder,
@@ -684,6 +684,7 @@ __all__ = [
     "UnsupportedError",
     "__version__",
     "__version_info__",
+    "as_oemolfunc",
     "available_engines",
     "energy",
     "ensure_engines_loaded",
