@@ -10,6 +10,9 @@ set(_OEVIBE_SWIG_DEPENDS
     ${CMAKE_SOURCE_DIR}/include/oevibe/Preset.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Solvent.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Property.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/MolecularSystem.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/Engine.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/EngineRegistry.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Constraints.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Options.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Result.h

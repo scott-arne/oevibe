@@ -1,6 +1,6 @@
 // swig/oevibe.i
 // SWIG interface file for oevibe Python bindings
-%module(threads="1") _oevibe
+%module(directors="1", threads="1") _oevibe
 
 %{
 #include "oevibe/oevibe.h"
@@ -381,6 +381,7 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 %include "std_map.i"
 %include "stdint.i"
 %include "exception.i"
+%include "std_shared_ptr.i"
 
 // std_vector.i wraps front(), back() and pop_back() straight onto the C++ methods, so calling any
 // of them on an empty vector is undefined behavior rather than an IndexError, and get_allocator
@@ -447,6 +448,52 @@ static int oevibe_add_exception(PyObject* module, PyObject** slot, const char* q
         }
     }
     return PyModule_AddObjectRef(module, name, *slot);
+}
+
+// A director method returned with a Python exception set. Converting it to the matching C++
+// exception is what lets spec 7.5 treat a Python engine exactly like a native one:
+// UnsupportedError becomes UNSUPPORTED, everything else ENGINE_ERROR carrying the Python
+// message. The GIL is held here, because a director callback always takes it.
+static bool oevibe_is_instance(PyObject* value, PyObject* type) {
+    return type != NULL && value != NULL && PyObject_IsInstance(value, type) == 1;
+}
+
+[[noreturn]] static void oevibe_throw_from_python() {
+    PyObject* type = NULL;
+    PyObject* value = NULL;
+    PyObject* traceback = NULL;
+    PyErr_Fetch(&type, &value, &traceback);
+    PyErr_NormalizeException(&type, &value, &traceback);
+    std::string message = "Python engine raised an exception";
+    if (value != NULL) {
+        PyObject* text = PyObject_Str(value);
+        if (text != NULL) {
+            // The module is built against the stable ABI, which has no PyUnicode_AsUTF8, so the
+            // message goes through a bytes object instead.
+            PyObject* encoded = PyUnicode_AsUTF8String(text);
+            if (encoded != NULL) {
+                const char* utf8 = PyBytes_AsString(encoded);
+                if (utf8 != NULL && *utf8 != '\0') {
+                    message = utf8;
+                }
+                Py_DECREF(encoded);
+            }
+            Py_DECREF(text);
+        }
+    }
+    const bool unsupported = oevibe_is_instance(value, g_unsupported_error);
+    const bool input = oevibe_is_instance(value, g_input_error);
+    const bool options = oevibe_is_instance(value, g_options_error);
+    const bool unavailable = oevibe_is_instance(value, g_engine_unavailable_error);
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(traceback);
+    PyErr_Clear();
+    if (unsupported) throw OEVIBE::UnsupportedError(message);
+    if (input) throw OEVIBE::InputError(message);
+    if (options) throw OEVIBE::OptionsError(message);
+    if (unavailable) throw OEVIBE::EngineUnavailableError(message);
+    throw std::runtime_error(message);
 }
 %}
 
@@ -644,6 +691,193 @@ OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::BondOrder>)
 %ignore std::vector<OEVIBE::BondOrder>::__setslice__;
 %ignore std::vector<OEVIBE::BondOrder>::__delslice__;
 %template(BondOrderVector) std::vector<OEVIBE::BondOrder>;
+
+// ---- Engines (spec 8.1, 8.2, 8.7) --------------------------------------------------------
+// A Python engine is a director subclass, so the GIL rules differ from the rest of the module:
+// a director callback can happen while Energy, Gradient, Optimize, Frequencies or Scan has
+// released the GIL, and SWIG's -threads support takes it back around every callback and around
+// the director destructor. Nothing here may be called with the registry mutex held
+// (EngineRegistry.h explains why).
+//
+// SWIG's default is to print the traceback and return a default value, which would turn a
+// failed Python engine into a silently wrong answer. Converting the pending exception into the
+// matching C++ one is what lets spec 7.5 treat a Python engine exactly like a native one.
+%feature("director:except") {
+    if ($error != NULL) {
+        oevibe_throw_from_python();
+    }
+}
+%feature("director") OEVIBE::Engine;
+%feature("director") OEVIBE::EngineSession;
+
+// The snapshot is immutable C++ state; returning its OEMolBase by reference would hand Python a
+// proxy openeye.oechem cannot use, so the molecule crosses as a copy the caller owns.
+%ignore OEVIBE::MolecularSystem::GetMolecule;
+// A MolecularSystem reaches Python only as a borrowed view that lives for one director callback,
+// so a reference-returning getter would hand out a window into storage C++ frees first. A
+// ``_parent`` keepalive cannot help here: the proxy it would pin does not own the C++ object
+// either. These four return copies instead, as Provenance::GetResolvedOptions already does.
+%ignore OEVIBE::MolecularSystem::GetAtomicNumbers;
+%ignore OEVIBE::MolecularSystem::GetOEAtomIndices;
+%ignore OEVIBE::MolecularSystem::GetConformerIndices;
+%ignore OEVIBE::MolecularSystem::GetConformerCoordinates;
+%include "oevibe/MolecularSystem.h"
+// A declaration takes its features when it is parsed, so the ignores above hid the header's
+// reference-returning getters; these lift them again for the %extend replacements only, exactly
+// as the Calculation::GetOptions block further down does.
+%rename("%s") OEVIBE::MolecularSystem::GetAtomicNumbers;
+%rename("%s") OEVIBE::MolecularSystem::GetOEAtomIndices;
+%rename("%s") OEVIBE::MolecularSystem::GetConformerIndices;
+%rename("%s") OEVIBE::MolecularSystem::GetConformerCoordinates;
+%extend OEVIBE::MolecularSystem {
+    std::vector<unsigned int> GetAtomicNumbers() const { return $self->GetAtomicNumbers(); }
+    std::vector<unsigned int> GetOEAtomIndices() const { return $self->GetOEAtomIndices(); }
+    std::vector<unsigned int> GetConformerIndices() const { return $self->GetConformerIndices(); }
+    std::vector<double> GetConformerCoordinates(unsigned int position) const {
+        return $self->GetConformerCoordinates(position);
+    }
+%pythoncode %{
+    @property
+    def molecule(self):
+        """A fresh ``openeye.oechem.OEMol`` copy of the snapshot (spec 8.7)."""
+        from openeye import oechem
+
+        mol = oechem.OEMol()
+        self.CopyMolecule(mol)
+        return mol
+%}
+}
+
+// Every vector an engine declaration mentions is instantiated before the header is parsed: a
+// declaration takes the typemaps that exist when SWIG reaches it, and a %template that lands
+// afterwards leaves it with the opaque-pointer director typemaps, which reject the list a
+// Python engine returns from GetMethods or GetKeywordSpecs. Forward declarations are all the
+// instantiation needs; Engine.h below supplies the definitions.
+namespace OEVIBE {
+struct KeywordSpec;
+struct MethodCapabilities;
+}
+OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::Method>)
+%template(MethodVector) std::vector<OEVIBE::Method>;
+OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::SolventModel>)
+%template(SolventModelVector) std::vector<OEVIBE::SolventModel>;
+// A vector of a scoped enum is the one container std_vector.i does not convert on its own: its
+// element traits say "pointer", so every solvent model would cross as an opaque pointer that
+// no engine can supply and that the read path leaks. (The library's own half-measure, a
+// traits_asval it drags in behind the container's ``front``, is both unreachable from the
+// pointer path and removed here with ``front`` itself.) These two specializations put the
+// element on the same footing as every other wrapped container's: an integer in, an integer
+// out.
+%fragment("OEVibeSolventModelTraits", "header", fragment="StdTraits",
+          fragment=SWIG_AsVal_frag(int), fragment=SWIG_From_frag(int)) {
+namespace swig {
+template <>
+struct traits_asptr<OEVIBE::SolventModel> {
+    static int asptr(PyObject* obj, OEVIBE::SolventModel** val) {
+        int number = 0;
+        const int res = SWIG_AsVal(int)(obj, &number);
+        if (SWIG_IsOK(res) && val != 0) {
+            // The caller owns the value, as the SWIG_NEWOBJ result says.
+            *val = new OEVIBE::SolventModel(static_cast<OEVIBE::SolventModel>(number));
+            return SWIG_NEWOBJ;
+        }
+        return res;
+    }
+};
+template <>
+struct traits_from<OEVIBE::SolventModel> {
+    static PyObject* from(const OEVIBE::SolventModel& val) {
+        return SWIG_From(int)(static_cast<int>(val));
+    }
+};
+}
+}
+%fragment("OEVibeSolventModelTraits");
+OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::MethodCapabilities>)
+%template(MethodCapabilitiesVector) std::vector<OEVIBE::MethodCapabilities>;
+OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::KeywordSpec>)
+%template(KeywordSpecVector) std::vector<OEVIBE::KeywordSpec>;
+
+// The engine structs are plain data that Python both fills and reads, so every member that is
+// not a primitive crosses as a copy: a sequence or mapping going in, a tuple, dict or owned
+// proxy coming out. Without this a container member would be settable only from a wrapped
+// vector, and reading one off an EngineSettings or MolecularSystem borrowed for a single
+// director callback would hand Python a view into storage C++ frees first.
+%naturalvar OEVIBE::KeywordSpec::methods;
+%naturalvar OEVIBE::MethodCapabilities::method;
+%naturalvar OEVIBE::MethodCapabilities::solvent_models;
+%naturalvar OEVIBE::MethodCapabilities::solvents;
+%naturalvar OEVIBE::MethodCapabilities::elements;
+%naturalvar OEVIBE::EngineSettings::method;
+%naturalvar OEVIBE::EngineSettings::solvent;
+%naturalvar OEVIBE::EngineSettings::keywords;
+%naturalvar OEVIBE::Evaluation::gradient;
+%naturalvar OEVIBE::Evaluation::hessian;
+%naturalvar OEVIBE::Evaluation::charges;
+%naturalvar OEVIBE::Evaluation::dipole;
+%naturalvar OEVIBE::Evaluation::orbital_energies;
+%naturalvar OEVIBE::Evaluation::bond_orders;
+%naturalvar OEVIBE::Evaluation::messages;
+
+// SWIG has no std::optional support, so find_method's return would reach Python as an opaque
+// pointer with no destructor: unreadable, and leaked on every call. An absent method becomes
+// None and a present one a MethodCapabilities copy the caller owns.
+%typemap(out) std::optional<OEVIBE::MethodCapabilities> {
+    if ($1.has_value()) {
+        $result = SWIG_NewPointerObj(new OEVIBE::MethodCapabilities($1.value()),
+                                     $descriptor(OEVIBE::MethodCapabilities*), SWIG_POINTER_OWN);
+    } else {
+        $result = SWIG_Py_Void();
+    }
+}
+
+%shared_ptr(OEVIBE::Engine)
+%shared_ptr(OEVIBE::EngineSession)
+
+// A Python CreateSession returns a session whose last Python reference dies when the method
+// returns, while C++ evaluates it for the rest of the conformer. SWIG's __disown__ would have
+// the C++ director hold the proxy while the proxy (a %shared_ptr one) holds the C++ object: a
+// cycle that leaks every session. Instead C++ receives a shared_ptr whose deleter owns the
+// Python reference, so releasing the last shared_ptr frees the proxy, which frees the session.
+// The deleter takes the GIL: spike S1 found sessions are destroyed inside RunConformers, which
+// runs with the GIL released.
+%typemap(directorout) std::shared_ptr<OEVIBE::EngineSession> {
+    void* argp = 0;
+    int newmem = 0;
+    const int res = SWIG_ConvertPtrAndOwn($input, &argp,
+                                          $descriptor(std::shared_ptr<OEVIBE::EngineSession>*),
+                                          0, &newmem);
+    if (!SWIG_IsOK(res) || argp == NULL) {
+        Swig::DirectorTypeMismatchException::raise(
+            SWIG_ErrorType(SWIG_TypeError), "CreateSession must return an EngineSession");
+    }
+    std::shared_ptr<OEVIBE::EngineSession>* owned =
+        reinterpret_cast<std::shared_ptr<OEVIBE::EngineSession>*>(argp);
+    OEVIBE::EngineSession* session = owned->get();
+    // A Python object of a derived wrapped class converts through a cast that allocates the
+    // shared_ptr it hands back; the caller owns that copy, and the proxy still holds the one
+    // that keeps the session alive.
+    if ((newmem & SWIG_CAST_NEW_MEMORY) != 0) {
+        delete owned;
+    }
+    if (session == NULL) {
+        Swig::DirectorTypeMismatchException::raise(SWIG_ErrorType(SWIG_ValueError),
+                                                   "CreateSession returned a null session");
+    }
+    PyObject* keepalive = $input;
+    Py_INCREF(keepalive);
+    std::shared_ptr<void> guard(static_cast<void*>(0), [keepalive](void*) {
+        SWIG_PYTHON_THREAD_BEGIN_BLOCK;
+        Py_DECREF(keepalive);
+        SWIG_PYTHON_THREAD_END_BLOCK;
+    });
+    $result = std::shared_ptr<OEVIBE::EngineSession>(guard, session);
+}
+%include "oevibe/Engine.h"
+OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
+%template(EngineVector) std::vector<std::shared_ptr<OEVIBE::Engine> >;
+%include "oevibe/EngineRegistry.h"
+
 %include "oevibe/Constraints.h"
 %include "oevibe/Options.h"
 // The member variables of the result structs are filled in C++, and Python receives them as
@@ -795,6 +1029,19 @@ class Property(_enum.IntEnum):
     DIPOLE = Property_DIPOLE
     ORBITAL_ENERGIES = Property_ORBITAL_ENERGIES
     BOND_ORDERS = Property_BOND_ORDERS
+
+
+class PartialChargePolicy(_enum.IntEnum):
+    NONE = PartialChargePolicy_NONE
+    ASSIGN_AM1BCC_ELF10 = PartialChargePolicy_ASSIGN_AM1BCC_ELF10
+    USE_INPUT = PartialChargePolicy_USE_INPUT
+
+
+class KeywordType(_enum.IntEnum):
+    BOOL = KeywordType_BOOL
+    INT = KeywordType_INT
+    DOUBLE = KeywordType_DOUBLE
+    STRING = KeywordType_STRING
 
 
 class Algorithm(_enum.IntEnum):

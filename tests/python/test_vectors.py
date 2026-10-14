@@ -8,7 +8,17 @@ import pytest
 
 from oevibe import oevibe as _proxy
 
-VECTOR_NAMES = ("DoubleVector", "UnsignedVector", "StringVector", "BondOrderVector")
+VECTOR_NAMES = (
+    "DoubleVector",
+    "UnsignedVector",
+    "StringVector",
+    "BondOrderVector",
+    "MethodVector",
+    "SolventModelVector",
+    "MethodCapabilitiesVector",
+    "KeywordSpecVector",
+    "EngineVector",
+)
 UNGUARDED = ("front", "back", "pop_back", "get_allocator")
 MAP_NAMES = ("StringStringMap", "UnsignedDoubleMap")
 
