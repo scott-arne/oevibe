@@ -23,6 +23,15 @@ EngineMolFunc::EngineMolFunc(const CalculationOptions& options) : options_(optio
     fd_step_ = preset_values(settings_.preset).fd_step;
 }
 
+EngineMolFunc::EngineMolFunc(const CalculationOptions& options, std::shared_ptr<Engine> engine,
+                             MethodCapabilities capabilities, EngineSettings settings,
+                             double fd_step)
+    : options_(options),
+      engine_(std::move(engine)),
+      capabilities_(std::move(capabilities)),
+      settings_(std::move(settings)),
+      fd_step_(fd_step) {}
+
 EngineMolFunc::~EngineMolFunc() = default;
 
 bool EngineMolFunc::Setup(const OEChem::OEMolBase& mol) {
@@ -180,7 +189,12 @@ OESystem::OEIterBase<OEOpt::OEFComponent>* EngineMolFunc::GetFComponents(const d
     return nullptr;
 }
 
-EngineMolFunc* EngineMolFunc::CreateCopy() const { return new EngineMolFunc(options_); }
+EngineMolFunc* EngineMolFunc::CreateCopy() const {
+    // Not the public constructor: it would resolve the options against the registry again, and a
+    // copy taken after an engine was replaced under the same name, or after a second provider of
+    // the method appeared, would not be a copy of this function.
+    return new EngineMolFunc(options_, engine_, capabilities_, settings_, fd_step_);
+}
 
 MolFuncEngine::MolFuncEngine(std::string name, std::string version, Method method,
                              const OEMolPotential::OEMolFunc1& prototype,

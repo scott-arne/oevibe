@@ -63,6 +63,12 @@ public:
     const std::string& GetSetupError() const;
 
 private:
+    /// ``CreateCopy``'s constructor: it adopts a resolution the original already made instead of
+    /// repeating it. The registry is process-wide and mutable, so re-resolving could bind the
+    /// copy to a different engine than the function it was copied from. The copy is not set up.
+    EngineMolFunc(const CalculationOptions& options, std::shared_ptr<Engine> engine,
+                  MethodCapabilities capabilities, EngineSettings settings, double fd_step);
+
     /// :returns: Dense coordinates gathered from the OpenEye-layout ``x``.
     std::vector<double> ToDense(const double* x) const;
     /// Evaluates at ``x`` unless the cache already holds it, then returns the cached energy.

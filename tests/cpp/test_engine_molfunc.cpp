@@ -233,6 +233,49 @@ TEST(EngineMolFuncTest, CreateCopyReturnsAnUnconfiguredFunctionOfTheSameOptions)
     EXPECT_NEAR((*copy)(x.data()), function(x.data()), 1e-10);
 }
 
+TEST(EngineMolFuncTest, CreateCopyKeepsTheEngineTheOriginalResolved) {
+    auto original = test::register_fake("molfunc-replaced");
+    original->force_constant = 50.0;
+    OEChem::OEMol mol = test::make_conformers("CCO");
+    EngineMolFunc function(fake_options("molfunc-replaced"));
+    ASSERT_TRUE(function.Setup(mol)) << function.GetSetupError();
+
+    // The registry is process-wide and mutable, so another engine can take the name after the
+    // function was built. A copy that re-resolved would compute with this stiffer spring.
+    auto replacement = test::register_fake("molfunc-replaced");
+    replacement->force_constant = 500.0;
+
+    std::unique_ptr<EngineMolFunc> copy(function.CreateCopy());
+    ASSERT_NE(copy, nullptr);
+    EXPECT_EQ(copy->NumVar(), 0u);
+    ASSERT_TRUE(copy->Setup(mol)) << copy->GetSetupError();
+    const std::vector<double> x = test::perturbed(coordinates_of(mol), 0.05);
+    EXPECT_DOUBLE_EQ((*copy)(x.data()), function(x.data()));
+    EXPECT_EQ(replacement->sessions_created, 0) << "the copy must not use the replacement engine";
+}
+
+TEST(EngineMolFuncTest, CreateCopyDoesNotResolveTheMethodAgainstTheRegistryAgain) {
+    const std::vector<MethodCapabilities> methods = {test::fake_capabilities("molfunc-one-method")};
+    auto provider = std::make_shared<test::FakeEngine>("molfunc-sole-provider", methods);
+    EngineRegistry::Instance().Register(provider, true);
+    // No engine named, so the registry resolves the method to its only provider.
+    CalculationOptions options;
+    options.SetMethod(Method("molfunc-one-method"));
+    OEChem::OEMol mol = test::make_conformers("CCO");
+    EngineMolFunc function(options);
+    ASSERT_TRUE(function.Setup(mol)) << function.GetSetupError();
+
+    auto competitor = std::make_shared<test::FakeEngine>("molfunc-rival-provider", methods);
+    EngineRegistry::Instance().Register(competitor, true);
+
+    // Resolving the method now would be ambiguous and throw, which an OpenEye caller asking for
+    // a copy has no way to handle; the copy reuses what the original resolved.
+    std::unique_ptr<EngineMolFunc> copy(function.CreateCopy());
+    ASSERT_NE(copy, nullptr);
+    ASSERT_TRUE(copy->Setup(mol)) << copy->GetSetupError();
+    EXPECT_EQ(competitor->sessions_created, 0) << "the copy must not use the competing provider";
+}
+
 TEST(EngineMolFuncTest, SetupFailsWhenPreparationWouldChangeTheAtoms) {
     OEChem::OEGraphMol mol;
     ASSERT_TRUE(OEChem::OESmilesToMol(mol, "CCO"));  // implicit hydrogens, no coordinates
