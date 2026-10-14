@@ -1,7 +1,9 @@
 """The GIL boundary: exactly five wrappers release it, and they really do (spec 8.1, 8.7)."""
 
 import re
+import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +41,13 @@ def test_another_python_thread_runs_between_two_director_callbacks():
     ``Gradient`` is used rather than ``Optimize`` because it makes exactly one callback per
     conformer whatever the potential looks like; an optimization of a spring anchored at its own
     starting geometry would converge after a single evaluation and observe nothing.
+
+    The switch interval is raised for the duration. At the default 5 ms, a waiting thread makes
+    the GIL holder yield at its next bytecode, so a verb that never released the GIL would still
+    let the worker run during any engine callback once the verb had lasted that long, and the
+    test would pass on exactly the regression it exists to catch. With a one-second interval a
+    GIL-holding verb of this size cannot be preempted, and the worker yielding after every
+    increment means a released verb never has to wait out the interval for it.
     """
     counter = [0]
     stop = threading.Event()
@@ -46,6 +55,7 @@ def test_another_python_thread_runs_between_two_director_callbacks():
     def worker():
         while not stop.is_set():
             counter[0] += 1
+            time.sleep(0)
 
     class WatchingSession(oevibe.PythonEngineSession):
         def __init__(self, observations):
@@ -93,13 +103,19 @@ def test_another_python_thread_runs_between_two_director_callbacks():
     options.SetEngine("gil-watch")
     options.SetMethod(oevibe.Method("spring"))
 
+    previous_interval = sys.getswitchinterval()
     thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
     try:
+        # Set before the worker starts: a thread already inside a timed wait for the GIL keeps
+        # the interval it started waiting with, and would still preempt a GIL-holding verb
+        # after 5 ms.
+        sys.setswitchinterval(1.0)
+        thread.start()
         results = oevibe.Calculation(options).Gradient(mol)
     finally:
         stop.set()
         thread.join(timeout=10)
+        sys.setswitchinterval(previous_interval)
 
     for result in results:
         assert result.GetStatus() == oevibe.ConformerStatus.OK, result.GetMessage()
