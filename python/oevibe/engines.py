@@ -173,9 +173,9 @@ def _register_retained(engine, replace: bool) -> None:
 
     The public :func:`register_engine` starts discovery before it registers, and discovery
     registers the engines it finds through this function instead, so that loading an engine never
-    goes back through the query path. The binding's ``Register`` wrapper keeps ``engine`` alive
-    for the life of the process before the native call commits, so nothing further is retained
-    here.
+    goes back through the query path. The binding's ``Register`` wrapper retains ``engine`` for
+    the life of the process before the native call commits -- the one exception being a native
+    ``_MolFuncEngine``, which borrows no Python state -- so nothing further is retained here.
 
     :param engine: An ``oevibe.Engine`` instance.
     :param replace: Replace an engine already registered under the same name.
