@@ -561,6 +561,7 @@ _load_cached_extension_if_needed()
 _check_openeye_version()
 
 from ._verbs import energy, frequencies, gradient, optimize, scan
+from .engines import Evaluation, PythonEngine, PythonEngineSession, register_engine
 from .oevibe import (
     Algorithm,
     Calculation,
@@ -573,7 +574,6 @@ from .oevibe import (
     EngineSession,
     EngineSettings,
     EngineUnavailableError,
-    Evaluation,
     EvaluationRequest,
     InputError,
     KeywordSpec,
@@ -654,6 +654,8 @@ __all__ = [
     "Preset",
     "Property",
     "Provenance",
+    "PythonEngine",
+    "PythonEngineSession",
     "ResultSet",
     "ScanOptions",
     "ScanPoint",
@@ -673,6 +675,7 @@ __all__ = [
     "get_python_library_directory",
     "gradient",
     "optimize",
+    "register_engine",
     "scan",
     "set_python_library_directory",
     "validate_evaluation",
