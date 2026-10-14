@@ -106,6 +106,7 @@ set(OEVIBE_SOURCES
     src/Options.cpp
     src/MolecularSystem.cpp
     src/core/InputPrep.cpp
+    src/core/EngineResolution.cpp
     src/Engine.cpp
     src/EngineRegistry.cpp
     src/engines/Builtins.cpp

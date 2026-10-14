@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "core/ConstraintMath.h"
+#include "core/EngineResolution.h"
 #include "core/Frequencies.h"
 #include "core/Geometry.h"
 #include "core/Hessian.h"
@@ -21,7 +22,6 @@
 #include "core/Thermochemistry.h"
 #include "core/Wavefront.h"
 #include "core/WriteBack.h"
-#include "oevibe/EngineRegistry.h"
 #include "oevibe/Error.h"
 #include "oevibe/Units.h"
 
@@ -33,24 +33,6 @@ using Clock = std::chrono::steady_clock;
 
 double seconds_since(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
-}
-
-/// The engine schema validates ``accuracy`` as a number only when it declares the keyword as
-/// DOUBLE, so a schema that declares another type can still hand over text that is not one.
-double parse_accuracy(const std::string& text) {
-    double value = 0.0;
-    bool parsed = false;
-    try {
-        std::size_t used = 0;
-        value = std::stod(text, &used);
-        parsed = used == text.size();
-    } catch (const std::exception&) {
-        parsed = false;
-    }
-    if (!parsed || !std::isfinite(value)) {
-        throw OptionsError("keyword 'accuracy' expects a finite number, got '" + text + "'");
-    }
-    return value;
 }
 
 std::string partial_charge_policy_name(PartialChargePolicy policy) {
@@ -127,31 +109,6 @@ std::string encode_restraints(const std::vector<Restraint>& restraints) {
                 encode_target(term.has_target, term.target);
     }
     return text;
-}
-
-Solvent resolve_solvent(const Solvent& requested, const MethodCapabilities& caps) {
-    if (requested.IsGasPhase()) {
-        return requested;
-    }
-    const std::string& method = caps.method.GetName();
-    if (caps.solvent_models.empty()) {
-        throw OptionsError("method '" + method + "' supports gas phase only; solvent '" +
-                           requested.GetName() + "' cannot be modeled");
-    }
-    SolventModel model = requested.GetModel();
-    if (model == SolventModel::AUTO) {
-        model = caps.solvent_models.front();
-    } else if (std::find(caps.solvent_models.begin(), caps.solvent_models.end(), model) ==
-               caps.solvent_models.end()) {
-        throw OptionsError("method '" + method + "' does not support solvent model '" +
-                           solvent_model_name(model) + "'");
-    }
-    if (!caps.solvents.empty() && std::find(caps.solvents.begin(), caps.solvents.end(),
-                                            requested.GetName()) == caps.solvents.end()) {
-        throw OptionsError("method '" + method + "' does not support solvent '" +
-                           requested.GetName() + "'");
-    }
-    return requested.WithModel(model);
 }
 
 /// The engine contract forbids a null session, but dereferencing one would crash the whole call
@@ -263,57 +220,13 @@ struct Calculation::CallState {
 
 Calculation::Calculation(const CalculationOptions& options) : options_(options) {
     options_.Validate();
-    EngineRegistry& registry = EngineRegistry::Instance();
-    if (options_.HasEngine()) {
-        engine_ = registry.Find(options_.GetEngine());
-        if (!engine_) {
-            throw EngineUnavailableError("no engine named '" + options_.GetEngine() +
-                                         "' is registered");
-        }
-    } else {
-        engine_ = registry.ResolveForMethod(options_.GetMethod());
-    }
-    engine_name_ = engine_->GetName();
-    if (!engine_->IsAvailable()) {
-        throw EngineUnavailableError("engine '" + engine_name_ +
-                                     "' is unavailable: " + engine_->GetUnavailableReason());
-    }
-    const std::optional<MethodCapabilities> caps = find_method(*engine_, options_.GetMethod());
-    if (!caps.has_value()) {
-        throw OptionsError("engine '" + engine_name_ + "' does not provide method '" +
-                           options_.GetMethod().GetName() + "'");
-    }
-    if (!caps->available) {
-        throw EngineUnavailableError("method '" + options_.GetMethod().GetName() + "' of engine '" +
-                                     engine_name_ +
-                                     "' is unavailable: " + caps->unavailable_reason);
-    }
-    engine_version_ = engine_->GetVersion();
-    capabilities_ = *caps;
-    settings_.method = options_.GetMethod();
-    settings_.solvent = resolve_solvent(options_.GetSolvent(), capabilities_);
-    // Spec 10 records solvent model resolution per result, so the model AUTO chose is visible
-    // without reading the provenance.
-    if (!settings_.solvent.IsGasPhase() && options_.GetSolvent().GetModel() == SolventModel::AUTO) {
-        solvent_warning_ = "solvent model AUTO resolved to '" +
-                           solvent_model_name(settings_.solvent.GetModel()) + "' for solvent '" +
-                           settings_.solvent.GetName() + "', the default of method '" +
-                           options_.GetMethod().GetName() + "'";
-    }
-    settings_.preset = options_.GetPreset();
-    settings_.accuracy = preset_values(settings_.preset).engine_accuracy;
-    settings_.properties = options_.GetEffectiveProperties();
-    settings_.keywords = options_.GetKeywords();
-    const unsigned unsupported = settings_.properties & ~capabilities_.properties;
-    if (unsupported != 0) {
-        throw OptionsError("method '" + options_.GetMethod().GetName() +
-                           "' does not provide: " + property_names(unsupported));
-    }
-    engine_->ValidateSettings(settings_);
-    // Applied after validation so the keyword's type and bounds are checked first.
-    if (options_.HasKeyword("accuracy")) {
-        settings_.accuracy = parse_accuracy(options_.GetKeyword("accuracy"));
-    }
+    detail::ResolvedEngine resolved = detail::resolve_engine(options_);
+    engine_ = std::move(resolved.engine);
+    engine_name_ = std::move(resolved.name);
+    engine_version_ = std::move(resolved.version);
+    capabilities_ = std::move(resolved.capabilities);
+    settings_ = std::move(resolved.settings);
+    solvent_warning_ = std::move(resolved.solvent_warning);
 }
 
 ResultSet Calculation::Energy(OEChem::OEMolBase& mol) { return RunSinglePoints(mol, false); }
@@ -331,11 +244,7 @@ Calculation::CallState Calculation::Prepare(OEChem::OEMolBase& mol) const {
 }
 
 PartialChargePolicy Calculation::ChargePolicy() const {
-    if (!capabilities_.requires_partial_charges) {
-        return PartialChargePolicy::NONE;
-    }
-    return options_.GetUseInputPartialCharges() ? PartialChargePolicy::USE_INPUT
-                                                : PartialChargePolicy::ASSIGN_AM1BCC_ELF10;
+    return detail::charge_policy(options_, capabilities_);
 }
 
 std::map<std::string, std::string> Calculation::BaseResolvedOptions() const {
