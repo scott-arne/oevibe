@@ -9,6 +9,7 @@ from openeye import oechem, oeff
 import oevibe
 
 METHOD = "mmff94s-molfunc"
+GRADIENT_ONLY_METHOD = "harmonic-molfunc"
 
 
 @pytest.fixture
@@ -20,9 +21,28 @@ def mmff_engine():
     return engine
 
 
+@pytest.fixture
+def harmonic_engine():
+    """An OpenEye potential that is an ``OEMolFunc1`` but not an ``OEMolFunc2``."""
+    engine = oevibe.MolFuncEngine(
+        "oeff-molfunc-harmonic",
+        "1.0",
+        oevibe.Method(GRADIENT_ONLY_METHOD),
+        oeff.OEHarmonicPotential(10.0, 0.0),
+    )
+    oevibe.register_engine(engine, replace=True)
+    return engine
+
+
 def molfunc_options():
     options = oevibe.CalculationOptions()
     options.SetMethod(oevibe.Method(METHOD))
+    return options
+
+
+def harmonic_options():
+    options = oevibe.CalculationOptions()
+    options.SetMethod(oevibe.Method(GRADIENT_ONLY_METHOD))
     return options
 
 
@@ -86,8 +106,52 @@ def test_the_declared_capabilities_follow_spec_8_8(mmff_engine):
     assert capabilities.analytic_gradient
     assert capabilities.analytic_hessian  # OEMMFF is an OEMolFunc2
     assert capabilities.charge_from_topology
+    assert not capabilities.requires_partial_charges  # the factory's default
     assert list(capabilities.solvent_models) == []
     assert capabilities.properties == 0
+
+
+def test_requires_partial_charges_reaches_the_capability():
+    """The factory argument is the only way this capability can ever be true."""
+    engine = oevibe.MolFuncEngine(
+        "oeff-molfunc-charges",
+        "1.0",
+        oevibe.Method("mmff94s-charges"),
+        oeff.OEMMFF(True),
+        requires_partial_charges=True,
+    )
+    capabilities = next(iter(engine.GetMethods()))
+    assert capabilities.requires_partial_charges
+
+
+def test_a_gradient_only_potential_declares_no_analytic_hessian(harmonic_engine):
+    """``OEHarmonicPotential`` is one of the 14 ``oeff`` potentials that are an ``OEMolFunc1``
+    without being an ``OEMolFunc2``, so the ``dynamic_cast`` behind ``analytic_hessian`` has to
+    report false for it."""
+    capabilities = next(iter(harmonic_engine.GetMethods()))
+    assert capabilities.analytic_gradient
+    assert not capabilities.analytic_hessian
+
+
+def test_frequencies_on_a_gradient_only_potential_use_finite_differences(
+    butanol_conformers, harmonic_engine
+):
+    """Asking a potential that is not an ``OEMolFunc2`` for a Hessian raises inside the session,
+    so this only returns at all if the declared capability sent ``Frequencies`` down the
+    finite-difference path instead.
+
+    The numbers are all zero, and that is OpenEye's doing rather than OEVibe's: the restraint
+    evaluates flat once ``CreateCopy()`` has been through it, where the same object set up
+    directly returns 2.5 kcal/mol for a 0.5 Angstrom displacement at ``kc=10``. What this test
+    pins is the path, which the shape of the result still shows.
+    """
+    results = oevibe.Calculation(harmonic_options()).Frequencies(
+        oechem.OEMol(butanol_conformers), oevibe.ThermoOptions()
+    )
+    result = results.Get(0)
+    assert result.GetStatus() == oevibe.ConformerStatus.OK, result.GetMessage()
+    frequencies = np.array(list(result.GetThermochemistry().frequencies))
+    assert len(frequencies) == 3 * butanol_conformers.NumAtoms() - 6
 
 
 def test_a_non_potential_is_rejected():
