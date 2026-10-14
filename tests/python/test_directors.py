@@ -11,6 +11,7 @@ import pytest
 from openeye import oechem
 
 import oevibe
+from oevibe import oevibe as _proxy
 
 LIVE_SESSIONS = []
 
@@ -192,6 +193,28 @@ def test_a_registered_engine_survives_its_last_python_reference(butanol_conforme
     )
     for result in results:
         assert result.GetStatus() == oevibe.ConformerStatus.OK, result.GetMessage()
+
+
+def test_registration_does_not_commit_before_the_keepalive(monkeypatch):
+    """The keepalive has to be in place before the native call mutates the process-wide
+    registry. With it afterwards, anything that stopped the append -- a MemoryError, an
+    asynchronous exception delivered between the two -- left the registry owning a director
+    whose Python object the unwinding was about to free.
+
+    The engine is held in a local here so that the failing order under test cannot actually
+    leave a dangling director behind in this process; what is asserted is that the registry and
+    the retention list can never disagree.
+    """
+
+    class Failing(list):
+        def append(self, item):
+            raise MemoryError("no room for the keepalive")
+
+    engine = SpringEngine("director-keepalive-fails")
+    monkeypatch.setattr(_proxy, "_REGISTERED_ENGINES", Failing())
+    with pytest.raises(MemoryError):
+        oevibe.EngineRegistry.Instance().Register(engine, True)
+    assert oevibe.EngineRegistry.Instance().Find("director-keepalive-fails") is None
 
 
 def test_a_system_kept_past_its_callback_still_reads(butanol_conformers):

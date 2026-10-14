@@ -930,7 +930,16 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 // therefore keeps every engine it registers for the life of the process (spec 8.7). Nothing is
 // ever dropped: registering over a name replaces it in the registry, but a Calculation built
 // earlier still holds a shared_ptr to the engine it resolved and goes on calling it.
-%pythonappend OEVIBE::EngineRegistry::Register %{
+//
+// The keepalive is taken BEFORE the native call, not after. Registration mutates a
+// process-wide registry, so an append that failed afterwards -- a MemoryError, an asynchronous
+// exception delivered between the two -- would raise out of a registry that already owns the
+// engine, and unwinding a temporary would then free the very Python object the director
+// borrows. Taking it first inverts the failure: the registry is never touched, and the only
+// cost is that an engine the registry goes on to reject stays retained. That is bounded memory
+// under user error. Nothing undoes the append on a failed Register, because a compensating pop
+// would open the same window it closed.
+%pythonprepend OEVIBE::EngineRegistry::Register %{
     _REGISTERED_ENGINES.append(engine)
 %}
 %include "oevibe/EngineRegistry.h"
