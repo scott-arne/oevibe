@@ -561,9 +561,19 @@ _load_cached_extension_if_needed()
 _check_openeye_version()
 
 from ._verbs import energy, frequencies, gradient, optimize, scan
-from .engines import Evaluation, PythonEngine, PythonEngineSession, register_engine
+from .engines import (
+    EngineInfo,
+    Evaluation,
+    MethodInfo,
+    PythonEngine,
+    PythonEngineSession,
+    available_engines,
+    ensure_engines_loaded,
+    register_engine,
+)
 from .oevibe import (
     Algorithm,
+    BondOrder,
     Calculation,
     CalculationOptions,
     ConformerResult,
@@ -628,12 +638,14 @@ set_python_library_directory(_python_library_directory())
 
 __all__ = [
     "Algorithm",
+    "BondOrder",
     "Calculation",
     "CalculationOptions",
     "ConformerResult",
     "ConformerStatus",
     "ConstraintSet",
     "Engine",
+    "EngineInfo",
     "EngineRegistry",
     "EngineSession",
     "EngineSettings",
@@ -645,6 +657,7 @@ __all__ = [
     "KeywordType",
     "Method",
     "MethodCapabilities",
+    "MethodInfo",
     "MolecularSystem",
     "OEVibeError",
     "OptimizationStats",
@@ -669,7 +682,9 @@ __all__ = [
     "UnsupportedError",
     "__version__",
     "__version_info__",
+    "available_engines",
     "energy",
+    "ensure_engines_loaded",
     "find_method",
     "frequencies",
     "get_python_library_directory",

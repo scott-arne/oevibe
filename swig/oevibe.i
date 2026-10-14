@@ -997,6 +997,14 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
     snapshot = *reinterpret_cast< $1_ltype >(argp);
     $1 = &snapshot;
 }
+// Entry-point engines have to be in the registry before a Calculation resolves its method, and
+// spec 8.7 loads them lazily on the first registry query. Constructing a Calculation is such a
+// query, and it is the one path into the registry that does not go through oevibe.engines.
+%pythonprepend OEVIBE::Calculation::Calculation %{
+    from oevibe.engines import ensure_engines_loaded as _ensure_engines_loaded
+
+    _ensure_engines_loaded()
+%}
 %include "oevibe/Calculation.h"
 %clear const OEVIBE::OptimizerOptions& options;
 %clear const OEVIBE::ThermoOptions& options;

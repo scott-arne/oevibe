@@ -8,6 +8,10 @@ objects through SWIG directors.
 
 from __future__ import annotations
 
+import dataclasses
+import threading
+from importlib import metadata
+
 import numpy as np
 
 from .oevibe import Engine as _Engine
@@ -167,7 +171,7 @@ class PythonEngine(_Engine):
 def _register_retained(engine, replace: bool) -> None:
     """Register ``engine`` without triggering entry-point discovery.
 
-    The public :func:`register_engine` will start discovery before it registers, and discovery
+    The public :func:`register_engine` starts discovery before it registers, and discovery
     registers the engines it finds, so that path needs a registration call that does not start
     discovery again. The binding's ``Register`` wrapper keeps ``engine`` alive for the life of the
     process before the native call commits, so nothing further is retained here.
@@ -185,13 +189,151 @@ def register_engine(engine, *, replace: bool = False) -> None:
     The package keeps the engine alive for the life of the process, because the C++ side only
     borrows its Python object.
 
+    Registering counts as the first registry query, so the ``oevibe.engines`` entry points load
+    before ``engine`` is registered; an entry-point engine of the same name is therefore already
+    present and is displaced only with ``replace=True``.
+
     :param engine: An :class:`PythonEngine` (strictly, any ``oevibe.Engine``) instance.
     :param replace: Replace an engine already registered under the same name.
     :raises TypeError: When ``engine`` is not an ``oevibe.Engine``.
     :raises OptionsError: For an empty or built-in name, or a duplicate name without ``replace``.
     """
+    ensure_engines_loaded()
     if not isinstance(engine, _Engine):
         raise TypeError(
             f"register_engine needs an oevibe.Engine, got {type(engine).__name__}"
         )
     _register_retained(engine, replace)
+
+
+_ENTRY_POINT_GROUP = "oevibe.engines"
+# Re-entrant on purpose. The loader itself never re-enters (it registers through the private
+# _register_retained), but plugin code runs while this is held: an entry point whose factory
+# calls register_engine() or available_engines() would deadlock on a plain Lock. With an RLock
+# the loading thread passes straight through and sees _LOADED already true, while other threads
+# still wait for the load to finish.
+_LOAD_LOCK = threading.RLock()
+_LOADED = False
+# Entry points that produced no usable engine, reported by available_engines() alongside the
+# registry's own engines (spec 8.7).
+_FAILED: list[EngineInfo] = []
+
+
+@dataclasses.dataclass(frozen=True)
+class MethodInfo:
+    """One method of an engine, with its own availability (spec 8.2)."""
+
+    name: str
+    available: bool
+    reason: str
+
+
+@dataclasses.dataclass(frozen=True)
+class EngineInfo:
+    """One engine as ``available_engines()`` reports it (spec 8.2)."""
+
+    name: str
+    version: str
+    available: bool
+    reason: str
+    methods: tuple[MethodInfo, ...]
+
+
+def _describe(engine) -> EngineInfo:
+    """:returns: One engine's report; any exception it raises becomes its unavailable reason."""
+    try:
+        name = engine.GetName()
+    except Exception as error:  # noqa: BLE001 - a broken engine must not break the listing
+        return EngineInfo("<unnamed>", "", False, f"GetName() raised: {error}", ())
+    try:
+        version = engine.GetVersion()
+    except Exception as error:  # noqa: BLE001
+        return EngineInfo(name, "", False, f"GetVersion() raised: {error}", ())
+    try:
+        available = bool(engine.IsAvailable())
+        reason = "" if available else engine.GetUnavailableReason()
+    except Exception as error:  # noqa: BLE001
+        return EngineInfo(name, version, False, f"IsAvailable() raised: {error}", ())
+    if not available:
+        return EngineInfo(name, version, False, reason, ())
+    try:
+        methods = tuple(
+            MethodInfo(
+                caps.method.GetName(), bool(caps.available), caps.unavailable_reason
+            )
+            for caps in engine.GetMethods()
+        )
+    except Exception as error:  # noqa: BLE001
+        return EngineInfo(name, version, False, f"GetMethods() raised: {error}", ())
+    return EngineInfo(name, version, True, "", methods)
+
+
+def _load_entry_point(point) -> None:
+    """Load one entry point and register its engine, recording any failure in ``_FAILED``.
+
+    Runs with ``_LOAD_LOCK`` held, so it registers through the private
+    :func:`_register_retained` rather than :func:`register_engine`, which would start discovery
+    again from inside discovery.
+    """
+    # Until the engine can name itself, the entry point's name is all there is to report under.
+    name = point.name
+    try:
+        factory = point.load()
+        engine = factory()
+        if not isinstance(engine, PythonEngine):
+            raise TypeError(
+                f"{point.value!r} returned {type(engine).__name__}, not an oevibe.PythonEngine"
+            )
+        name = engine.GetName()
+        engine.GetMethods()  # spec 8.7: a plugin that cannot describe itself is unavailable
+    except Exception as error:  # noqa: BLE001 - one bad plugin must not hide the others
+        _FAILED.append(
+            EngineInfo(
+                name, "", False, f"entry point {point.value!r} failed: {error}", ()
+            )
+        )
+        return
+    if EngineRegistry.Instance().Find(name) is not None:
+        # First in importlib.metadata order wins (spec 8.7).
+        _FAILED.append(
+            EngineInfo(
+                name,
+                "",
+                False,
+                f"engine name {name!r} is already registered; "
+                f"entry point {point.value!r} was skipped",
+                (),
+            )
+        )
+        return
+    try:
+        _register_retained(engine, False)
+    except Exception as error:  # noqa: BLE001
+        _FAILED.append(
+            EngineInfo(
+                name, "", False, f"entry point {point.value!r} failed: {error}", ()
+            )
+        )
+
+
+def ensure_engines_loaded() -> None:
+    """Load the ``oevibe.engines`` entry points once, on the first registry query (spec 8.7)."""
+    global _LOADED
+    with _LOAD_LOCK:
+        if _LOADED:
+            return
+        # Set before loading: a plugin that raises must not make every later query retry it.
+        _LOADED = True
+        for point in metadata.entry_points(group=_ENTRY_POINT_GROUP):
+            _load_entry_point(point)
+
+
+def available_engines() -> list[EngineInfo]:
+    """Every known engine with its availability and, when unavailable, the reason (spec 8.2).
+
+    :returns: The registry's engines in registration order, then the entry points that failed.
+    """
+    ensure_engines_loaded()
+    infos = [_describe(engine) for engine in EngineRegistry.Instance().List()]
+    infos.extend(_FAILED)
+    return infos
