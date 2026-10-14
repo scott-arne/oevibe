@@ -321,6 +321,36 @@ TEST(CalculationScanTest, ButaneMmff94ProfileHasTheExpectedShape) {
     EXPECT_FALSE(OEChem::OEHasSDData(*mol.GetActive(), "OEVibe.mmff94.gas.Status"));
 }
 
+TEST(CalculationScanTest, ScanProvenanceRecordsTheCallerConstraintSetNotTheGridPointSet) {
+    std::vector<unsigned> chain;
+    OEChem::OEMol mol = all_anti("CCCC", chain);
+    // The empty assertions above cannot tell the caller's set from no set at all, so this scan
+    // fills all three keys, each from a different atom. Every grid point augments this set with
+    // the scanned dihedral: were that augmented set recorded, optimizer.constraints would carry
+    // a dihedral term, and its target would differ from one point to the next.
+    ConstraintSet caller;
+    caller.AddDistance(chain[1], chain[2]);
+    caller.FreezeAtomIndices({chain[0]});
+    caller.AddPositionRestraint(chain[3], 10.0);
+    OptimizerOptions optimizer;
+    optimizer.SetConstraints(caller);
+    ScanOptions scan_options = backbone_scan(chain, 120.0);
+    scan_options.SetOptimizerOptions(optimizer);
+    const ScanResult scan = Calculation(mmff94()).Scan(mol, scan_options);
+    ASSERT_EQ(scan.GetNumPoints(), 3u);
+    for (std::size_t i = 0; i < scan.GetNumPoints(); ++i) {
+        ASSERT_EQ(scan.GetPoint(i).GetStatus(), ScanPointStatus::OK)
+            << i << ": " << scan.GetPoint(i).GetMessage();
+    }
+
+    const std::map<std::string, std::string>& resolved = scan.GetProvenance().resolved_options;
+    EXPECT_EQ(resolved.at("optimizer.constraints"),
+              "distance:" + std::to_string(chain[1]) + "," + std::to_string(chain[2]) + ":start");
+    EXPECT_EQ(resolved.at("optimizer.frozen_atoms"), std::to_string(chain[0]));
+    EXPECT_EQ(resolved.at("optimizer.restraints"),
+              "position:" + std::to_string(chain[3]) + ":10.000000:start");
+}
+
 TEST(CalculationScanTest, PartialRangesIncludeBothEnds) {
     std::vector<unsigned> chain;
     OEChem::OEMol mol = all_anti("CCCC", chain);

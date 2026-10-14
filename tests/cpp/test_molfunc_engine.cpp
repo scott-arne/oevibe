@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "oevibe/Error.h"
@@ -15,6 +16,10 @@
 using namespace OEVIBE;
 
 namespace {
+
+bool contains(const std::string& text, const std::string& part) {
+    return text.find(part) != std::string::npos;
+}
 
 EngineSettings settings_for(const char* method) {
     EngineSettings settings;
@@ -114,8 +119,11 @@ public:
         double energy = 0.0;
         for (std::size_t k = 0; k < num_var_; ++k) {
             energy += 0.5 * StiffnessAt(k) * x[k] * x[k];
-            // OpenEye sums the components of a composite potential into one buffer, so a
-            // potential adds to the gradient it is handed rather than overwriting it.
+            // OpenEye sums the components of a composite potential into one buffer, so its
+            // contract is that a potential adds to the gradient it is handed. Conforming to it
+            // here is a matter of being a faithful stand-in, not something the tests below
+            // discriminate: MolFuncSession hands over a freshly zeroed buffer
+            // (src/core/MolFuncSession.cpp), so an overwriting potential would pass identically.
             g[k] += StiffnessAt(k) * x[k];
         }
         return energy;
@@ -243,6 +251,10 @@ TEST(MolFuncEngineTest, GradientOnlyPrototypeRoundTripsEnergyAndGradient) {
     // pin that it was neither dropped nor double-counted.
     const std::vector<double> analytic = gradient_at(*session, x);
     ASSERT_EQ(analytic.size(), x.size());
+    // Evaluating twice pins the other half of that arrangement: every call starts from a
+    // zeroed buffer. One carried over between calls would hand this accumulating potential a
+    // non-zero gradient, and the second result would come back doubled.
+    EXPECT_EQ(gradient_at(*session, x), analytic);
     const double step = 1e-5;
     for (std::size_t k = 0; k < x.size(); ++k) {
         std::vector<double> plus = x;
@@ -255,10 +267,17 @@ TEST(MolFuncEngineTest, GradientOnlyPrototypeRoundTripsEnergyAndGradient) {
         EXPECT_NEAR(analytic[k], numeric, 1e-6 * std::max(1.0, std::abs(numeric))) << k;
     }
 
-    // The capability and the session agree: there is no Hessian to ask for.
+    // The capability and the session agree: there is no Hessian to ask for. Every OEVibe error
+    // derives from std::runtime_error (include/oevibe/Error.h), so only the text separates this
+    // from an unsupported system or a Hessian evaluation that ran and failed.
     EvaluationRequest request;
     request.hessian = true;
-    EXPECT_THROW(session->Evaluate(x, request), std::runtime_error);
+    try {
+        session->Evaluate(x, request);
+        FAIL() << "expected std::runtime_error";
+    } catch (const std::runtime_error& e) {
+        EXPECT_TRUE(contains(e.what(), "no analytic Hessian")) << e.what();
+    }
 }
 
 TEST(MolFuncEngineTest, FailedSetupIsUnsupported) {
