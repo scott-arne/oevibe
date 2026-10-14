@@ -45,6 +45,7 @@ def test_gradient_matches_the_cpp_engine(butanol_conformers):
     assert np.allclose(
         np.array(list(python.Get(0).GetGradient())),
         np.array(list(cpp.Get(0).GetGradient())),
+        rtol=0.0,
         atol=1e-9,
     )
 
@@ -62,8 +63,14 @@ def test_optimization_reproduces_the_cpp_engine(butanol_conformers):
             from_python.GetMessage()
         )
         assert from_cpp.GetStatus() == oevibe.ConformerStatus.OK, from_cpp.GetMessage()
+        # Both bounds are absolute (``approx(abs=...)`` ignores relative tolerance; ``allclose``
+        # needs ``rtol=0.0``). They stay at 1e-6 kcal/mol and 1e-5 Angstrom because the
+        # evaluations are pinned to 1e-9 by the tests above and the iteration counts below demand
+        # the same path, so this only has to say both runs ended at the same minimum.
         assert from_python.GetEnergy() == pytest.approx(from_cpp.GetEnergy(), abs=1e-6)
-        assert np.allclose(coordinates(from_python), coordinates(from_cpp), atol=1e-5)
+        assert np.allclose(
+            coordinates(from_python), coordinates(from_cpp), rtol=0.0, atol=1e-5
+        )
         assert (
             from_python.GetOptimizationStats().iterations
             == from_cpp.GetOptimizationStats().iterations
@@ -150,7 +157,7 @@ def test_gradient_parity_holds_when_the_first_atom_index_is_unused():
     assert np.abs(python_gradient[3:]).max() > 1.0, (
         "a near-zero gradient would prove nothing"
     )
-    assert np.allclose(python_gradient, cpp_gradient, atol=1e-9)
+    assert np.allclose(python_gradient, cpp_gradient, rtol=0.0, atol=1e-9)
 
 
 def test_frequencies_through_the_python_engine(butanol_conformers):
@@ -165,12 +172,16 @@ def test_frequencies_through_the_python_engine(butanol_conformers):
     frequencies = list(results.Get(0).GetThermochemistry().frequencies)
     assert len(frequencies) == 3 * butanol_conformers.NumAtoms() - 6
     # The C++ engine has an analytic Hessian where this one is differenced from gradients, so the
-    # two agree only to finite-difference accuracy (measured: 0.2 cm^-1 at worst). A units or
-    # layout error moves modes by far more than the 1 cm^-1 allowed here.
+    # two agree only to finite-difference accuracy (measured: 0.2 cm^-1 at worst). The bound is
+    # deliberately loose and absolute (``rtol=0.0``): a units or layout error moves modes by far
+    # more than the 1 cm^-1 allowed here, and the gradient tests hold the exactness.
     cpp = oevibe.Calculation(options("oeff")).Frequencies(
         oechem.OEMol(butanol_conformers), thermo
     )
     assert cpp.Get(0).GetStatus() == oevibe.ConformerStatus.OK, cpp.Get(0).GetMessage()
     assert np.allclose(
-        frequencies, list(cpp.Get(0).GetThermochemistry().frequencies), atol=1.0
+        frequencies,
+        list(cpp.Get(0).GetThermochemistry().frequencies),
+        rtol=0.0,
+        atol=1.0,
     )
