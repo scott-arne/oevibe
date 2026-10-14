@@ -83,6 +83,54 @@ TEST(EngineMolFuncTest, GradientAccumulatesAndLeavesGapsAlone) {
     }
 }
 
+TEST(EngineMolFuncTest, GradientValuesOnAGappedMoleculeFollowTheCallerIndexMap) {
+    OEChem::OEMol mol = test::make_gapped_methane();
+    auto fake = test::register_fake("molfunc-map");
+    EngineMolFunc function(fake_options(fake->GetName()));
+    ASSERT_TRUE(function.Setup(mol)) << function.GetSetupError();
+    const std::vector<double> reference = coordinates_of(mol);
+
+    // The caller's atom indices in iteration order. Dense position k is the k-th of these, so
+    // the expected values below are built without asking the adapter what its map is.
+    std::vector<unsigned> caller_indices;
+    for (OESystem::OEIter<OEChem::OEAtomBase> atom = mol.GetAtoms(); atom; ++atom) {
+        caller_indices.push_back(atom->GetIdx());
+    }
+    ASSERT_EQ(caller_indices.size(), 5u);
+
+    // The fake engine's spring reference is the prepared copy's conformer 0, which is this
+    // geometry gathered: at it the energy and every force are exactly zero. A gather that read
+    // dense position k from variable 3 * k would feed the engine the gap instead of an atom,
+    // and neither would be zero.
+    std::vector<double> at_reference(function.NumVar(), 0.0);
+    EXPECT_DOUBLE_EQ(function(reference.data(), at_reference.data()), 0.0);
+    for (unsigned k = 0; k < function.NumVar(); ++k) {
+        EXPECT_DOUBLE_EQ(at_reference[k], 0.0) << "variable " << k;
+    }
+
+    const std::vector<double> x = test::perturbed(reference, 0.05);
+    std::vector<double> dense_reference;
+    std::vector<double> dense_x;
+    for (unsigned index : caller_indices) {
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            dense_reference.push_back(reference[3 * index + axis]);
+            dense_x.push_back(x[3 * index + axis]);
+        }
+    }
+    std::vector<double> expected_dense;
+    const double expected_energy =
+        test::spring_energy(dense_reference, dense_x, fake->force_constant, &expected_dense);
+
+    std::vector<double> gradient(function.NumVar(), 0.0);
+    EXPECT_DOUBLE_EQ(function(x.data(), gradient.data()), expected_energy);
+    for (std::size_t k = 0; k < caller_indices.size(); ++k) {
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            EXPECT_DOUBLE_EQ(gradient[3 * caller_indices[k] + axis], expected_dense[3 * k + axis])
+                << "atom " << caller_indices[k] << " axis " << axis;
+        }
+    }
+}
+
 TEST(EngineMolFuncTest, HessianFillsThePackedLowerTriangleAndMatchesFiniteDifferences) {
     OEChem::OEMol mol = test::make_conformers("CCO");
     EngineMolFunc function(mmff_options());
@@ -107,6 +155,59 @@ TEST(EngineMolFuncTest, HessianFillsThePackedLowerTriangleAndMatchesFiniteDiffer
             function(minus.data(), gm.data());
             const double expected = (gp[row] - gm[row]) / (2.0 * step);
             EXPECT_NEAR(packed[static_cast<std::size_t>(row) * (row + 1) / 2 + col], expected, 5e-2)
+                << "element (" << row << ", " << col << ")";
+        }
+    }
+}
+
+TEST(EngineMolFuncTest, HessianOnAGappedMoleculeLeavesTheGapRowsAndColumnsAlone) {
+    OEChem::OEMol mol = test::make_gapped_methane();
+    EngineMolFunc function(fake_options(test::register_fake("molfunc-gap-hessian")->GetName()));
+    ASSERT_TRUE(function.Setup(mol)) << function.GetSetupError();
+    const unsigned nvar = function.NumVar();
+    const std::vector<double> x = test::perturbed(coordinates_of(mol), 0.05);
+
+    // A nonzero fill, so an untouched element is distinguishable from one written as zero and
+    // every written element has to be read back as the fill plus the value.
+    const double fill = 11.0;
+    std::vector<double> packed(static_cast<std::size_t>(nvar) * (nvar + 1) / 2, fill);
+    std::vector<double> gradient(nvar, 0.0);
+    ASSERT_TRUE(function(x.data(), packed.data(), gradient.data())) << function.GetSetupError();
+
+    // Atom index 1 was deleted, so nothing may be written in its rows or in its columns.
+    const unsigned gap_atom = 1;
+    for (unsigned row = 0; row < nvar; ++row) {
+        for (unsigned col = 0; col <= row; ++col) {
+            if (row / 3 != gap_atom && col / 3 != gap_atom) {
+                continue;
+            }
+            EXPECT_DOUBLE_EQ(packed[static_cast<std::size_t>(row) * (row + 1) / 2 + col], fill)
+                << "element (" << row << ", " << col << ")";
+        }
+    }
+
+    // The elements that were written are the right ones: each still matches the finite
+    // difference of the adapter's own gradient, which the caller index map also produced.
+    const double step = 1e-4;
+    for (unsigned row = 0; row < nvar; ++row) {
+        if (row / 3 == gap_atom) {
+            continue;
+        }
+        for (unsigned col = 0; col <= row; col += 4) {
+            if (col / 3 == gap_atom) {
+                continue;
+            }
+            std::vector<double> plus = x;
+            std::vector<double> minus = x;
+            plus[col] += step;
+            minus[col] -= step;
+            std::vector<double> gp(nvar, 0.0);
+            std::vector<double> gm(nvar, 0.0);
+            function(plus.data(), gp.data());
+            function(minus.data(), gm.data());
+            const double expected = (gp[row] - gm[row]) / (2.0 * step);
+            EXPECT_NEAR(packed[static_cast<std::size_t>(row) * (row + 1) / 2 + col] - fill,
+                        expected, 1e-2)
                 << "element (" << row << ", " << col << ")";
         }
     }
