@@ -45,12 +45,21 @@ def _checked_float(name: str, value: Any) -> float:
     return float(value)
 
 
-def _enum_value(name: str, value: Any, table: Mapping[str, int], expected: str) -> int:
+def _enum_value(
+    name: str,
+    value: Any,
+    table: Mapping[str, int],
+    expected: str,
+    *,
+    remedy: str = "",
+) -> int:
     """:returns: The enumerator for a name, or an integer that is one of the enumerators.
 
     SWIG would accept any integer and reject an out-of-range one with ``OverflowError``, so the
     check happens here where every invalid option is an ``OptionsError``.
 
+    :param remedy: Appended to the message for an integer that is not one of the enumerators,
+        for an option whose caller may plausibly be holding a combination of them.
     :raises OptionsError: For an unknown name, a non-integer, or an integer outside the enum.
     """
     if isinstance(value, str):
@@ -62,10 +71,14 @@ def _enum_value(name: str, value: Any, table: Mapping[str, int], expected: str) 
             ) from None
     # bool is an Integral, and True would silently mean the enumerator numbered 1.
     if isinstance(value, bool) or not isinstance(value, numbers.Integral):
-        raise _core.OptionsError(f"{name} must be a name or an integer, got {value!r}")
+        raise _core.OptionsError(
+            f"{name} must be a name or an integer, got {value!r}; expected {expected}"
+        )
     number = int(value)
     if number not in set(table.values()):
-        raise _core.OptionsError(f"unknown {name} {number}; expected {expected}")
+        raise _core.OptionsError(
+            f"unknown {name} {number}; expected {expected}{remedy}"
+        )
     return number
 
 
@@ -85,7 +98,14 @@ def _properties(values: Iterable[Any]) -> int:
     mask = 0
     for value in values:
         mask |= _enum_value(
-            "property", value, _PROPERTIES, f"one of {sorted(_PROPERTIES)}"
+            "property",
+            value,
+            _PROPERTIES,
+            f"one of {sorted(_PROPERTIES)}",
+            # MethodCapabilities.properties and EngineSettings.properties are bit sets, so an
+            # integer that combines several properties is a value this package handed the
+            # caller; telling them only that it is unknown leaves them nowhere to go.
+            remedy=", each passed as its own value rather than combined into one bit set",
         )
     return mask
 
@@ -149,7 +169,8 @@ def energy(
     :param solvent: ``None`` for gas phase, a solvent name, or a :class:`Solvent`.
     :param engine: Engine name overriding the method's default routing.
     :param preset: ``"fast"``, ``"standard"``, ``"thorough"``, or a :class:`Preset`.
-    :param properties: Property names or :class:`Property` values to compute.
+    :param properties: Property names or :class:`Property` values to compute, each passed as
+        its own value; a combined bit set is not accepted.
     :param charge: Total charge override.
     :param multiplicity: Spin multiplicity override.
     :param keywords: Engine-specific keywords.

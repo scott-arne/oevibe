@@ -24,6 +24,32 @@ def test_an_invalid_property_is_an_options_error(value):
         _verbs._properties([value])
 
 
+def test_a_property_bit_set_is_told_to_pass_each_property_separately():
+    # MethodCapabilities.properties and EngineSettings.properties are documented bit sets, so a
+    # caller can hold 7 without ever having built it, and has to be told how to pass it on.
+    mask = (
+        int(oevibe.Property.CHARGES)
+        | int(oevibe.Property.DIPOLE)
+        | int(oevibe.Property.ORBITAL_ENERGIES)
+    )
+    assert mask == 7
+    with pytest.raises(oevibe.OptionsError) as raised:
+        _verbs._properties([mask])
+    message = str(raised.value)
+    assert (
+        "each passed as its own value rather than combined into one bit set" in message
+    )
+    # The remedy is added to the existing list, not substituted for it.
+    assert "unknown property 7; expected one of ['bond_orders'" in message
+
+
+@pytest.mark.parametrize("value", ["quick", None, 99])
+def test_an_invalid_preset_lists_the_presets_whatever_its_type(value):
+    with pytest.raises(oevibe.OptionsError) as raised:
+        _verbs._preset(value)
+    assert "fast, standard, or thorough" in str(raised.value)
+
+
 def test_valid_presets_and_properties_still_resolve():
     assert _verbs._preset("Thorough") == _verbs._preset(oevibe.Preset.THOROUGH)
     assert _verbs._algorithm("ANC_RFO") == _verbs._algorithm(oevibe.Algorithm.ANC_RFO)
