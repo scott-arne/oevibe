@@ -1,6 +1,8 @@
 """OpenEye potentials as OEVibe engines (spec 8.8)."""
 
 import gc
+import subprocess
+import sys
 import weakref
 
 import numpy as np
@@ -14,6 +16,28 @@ from oevibe.oevibe import _MolFuncEngine
 
 METHOD = "mmff94s-molfunc"
 GRADIENT_ONLY_METHOD = "harmonic-molfunc"
+
+_OEMOLFUNC_SUBCLASS_SWEEP_CHILD = """
+import importlib
+import pkgutil
+
+import openeye
+from openeye import oeff
+
+strays = []
+for info in pkgutil.iter_modules(openeye.__path__):
+    try:
+        module = importlib.import_module("openeye." + info.name)
+    except ImportError:
+        continue
+    if module is oeff:
+        continue
+    for name in dir(module):
+        candidate = getattr(module, name)
+        if isinstance(candidate, type) and issubclass(candidate, oeff.OEMolFunc1):
+            strays.append("openeye." + info.name + "." + name)
+print(("STRAYS " + " ".join(strays)) if strays else "NO STRAYS")
+"""
 
 
 @pytest.fixture
@@ -261,6 +285,75 @@ def test_a_python_subclass_cannot_spoof_the_name_of_a_real_potential():
         oevibe.MolFuncEngine(
             "spoofed-named", "1.0", oevibe.Method("nope"), Spoofed(True)
         )
+
+
+def test_a_subclass_rebound_into_the_openeye_module_is_rejected(monkeypatch):
+    """Re-exporting the subclass from ``openeye.oeff`` used to satisfy the identity check.
+
+    Reading ``getattr(oeff, kind.__name__)`` on every call asked a mutable module what it
+    exported *now*; assigning ``oeff.Reexported = Reexported`` made the answer yes, and
+    ``MolFuncEngine`` then returned native MMFF energies while the override below never ran.
+    The snapshot is taken before the rebinding here, which is the ordering the guard relies on.
+    """
+    calls = []
+
+    class Reexported(oeff.OEMMFF):
+        __module__ = "oeff"
+
+        def CreateCopy(self):
+            calls.append("CreateCopy")
+            raise AssertionError("the subclass must never be used as a potential")
+
+    # Warm the snapshot first; a test that rebound oeff before OEVibe had ever looked at it
+    # would prove nothing about the mechanism.
+    oevibe.MolFuncEngine(
+        "snapshot-warmup", "1.0", oevibe.Method("mmff94s-warmup"), oeff.OEMMFF(True)
+    )
+    monkeypatch.setattr(oeff, "Reexported", Reexported, raising=False)
+    assert oeff.Reexported is Reexported, "the rebinding itself must have taken effect"
+
+    with pytest.raises(TypeError, match="PythonEngine"):
+        oevibe.MolFuncEngine("rebound", "1.0", oevibe.Method("nope"), Reexported(True))
+    assert calls == []
+
+
+def test_the_potential_snapshot_covers_every_oeff_potential():
+    """The snapshot stands in for ``openeye.oeff`` itself, so it has to hold every potential.
+
+    Re-derive the enumeration (69 classes in the pinned OpenEye) and fail on any difference: a
+    class the snapshot missed would be a legitimate potential ``MolFuncEngine`` now refuses.
+    """
+    from oevibe.oemolfunc import _openeye_potential_classes
+
+    enumerated = {
+        candidate
+        for candidate in (getattr(oeff, name) for name in dir(oeff))
+        if isinstance(candidate, type) and issubclass(candidate, oeff.OEMolFunc1)
+    }
+    assert enumerated == set(_openeye_potential_classes())
+
+
+def test_no_other_openeye_module_exports_an_oeff_potential():
+    """Snapshotting ``oeff`` alone is only complete because nothing else subclasses its base.
+
+    ``oeet``, ``oequacpac`` and ``oeshape`` each export an ``OEMolFunc1`` of their own, but a
+    *distinct* class: an instance of one fails the ``isinstance`` gate in ``_as_molfunc1``
+    before the snapshot is ever consulted.
+
+    The sweep runs in a child process because importing an OpenEye module rebinds the proxy
+    class SWIG hands back for ``OEMolPotential::OEMolFunc1*`` process-wide -- after
+    ``import openeye.oequacpac``, ``oeff.OEGenericFF.GetComponents()`` returns
+    ``oequacpac.OEMolFunc1`` proxies, which the rest of this file would then fail on.
+    """
+    child = subprocess.run(
+        [sys.executable, "-c", _OEMOLFUNC_SUBCLASS_SWEEP_CHILD],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip().splitlines()[-1] == "NO STRAYS", child.stdout
 
 
 def test_a_python_subclass_laundered_through_the_openeye_upcast_is_rejected():

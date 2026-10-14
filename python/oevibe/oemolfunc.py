@@ -2,25 +2,55 @@
 
 from __future__ import annotations
 
-import importlib
-
 from .oevibe import OptionsError, _MolFuncEngine
+
+_OPENEYE_POTENTIAL_CLASSES: frozenset[type] | None = None
+
+
+def _openeye_potential_classes() -> frozenset[type]:
+    """:returns: Every class ``openeye.oeff`` exports that derives from ``OEMolFunc1``.
+
+    Captured once, on the first potential OEVibe is asked about, and reused from then on. The
+    import stays inside the function because this module never imports ``openeye`` at ``oevibe``
+    import time.
+
+    Snapshotting ``oeff`` alone is complete: all 69 ``OEMolFunc1`` subclasses live there, and the
+    other OpenEye modules that export an ``OEMolFunc1`` (``oeet``, ``oequacpac``, ``oeshape``)
+    export a *distinct* class whose instances fail the ``isinstance`` gate in :func:`_as_molfunc1`
+    before the snapshot is consulted. ``test_the_potential_snapshot_covers_every_oeff_potential``
+    and ``test_no_other_openeye_module_exports_an_oeff_potential`` fail if either stops holding.
+    """
+    global _OPENEYE_POTENTIAL_CLASSES
+    if _OPENEYE_POTENTIAL_CLASSES is None:
+        from openeye import oeff
+
+        # Attribute access only; constructing all 69 is far too expensive to do here, and the
+        # enumeration does not need to know which of them are abstract.
+        _OPENEYE_POTENTIAL_CLASSES = frozenset(
+            candidate
+            for candidate in (getattr(oeff, name) for name in dir(oeff))
+            if isinstance(candidate, type) and issubclass(candidate, oeff.OEMolFunc1)
+        )
+    return _OPENEYE_POTENTIAL_CLASSES
 
 
 def _is_openeye_type(kind) -> bool:
-    """:returns: Whether ``kind`` is the class one of OpenEye's binding modules exports.
+    """:returns: Whether ``kind`` is one of the potential classes OpenEye itself defines.
 
-    OpenEye's SWIG proxies report a bare module name such as ``oeff``, which is importable as
-    ``openeye.oeff``. That the module imports proves nothing on its own, because
-    ``type.__module__`` is writable: a Python-defined subclass that claims ``oeff`` would pass.
-    So the test is identity -- ``kind`` must BE the object ``openeye.<module>`` exports under
-    ``kind``'s own ``__name__``, which no subclass can arrange.
+    Membership in the snapshot, not a live read of ``openeye.oeff``. A module is mutable, so
+    asking it what it exports *now* answered yes to any class assigned into it:
+    ``oeff.Reexported = Reexported`` made a Python-defined subclass pass, and ``MolFuncEngine``
+    then ran native MMFF while the caller believed the subclass was in play. Comparing against a
+    set captured before any of that happened closes it, and a frozenset lookup is also cheaper
+    than the ``import_module`` plus ``getattr`` it replaces -- a nice property, not the reason.
+
+    What this does NOT achieve: a caller who rebinds ``openeye.oeff``, or patches this module's
+    own state, *before* OEVibe's first potential check still defeats it, and so does one who
+    simply replaces this function. No predicate written in Python survives a caller willing to
+    mutate module state. This is a guardrail against unsupported usage that would otherwise
+    return a silently wrong answer, not a security boundary.
     """
-    try:
-        module = importlib.import_module(f"openeye.{kind.__module__}")
-    except (ImportError, ValueError):
-        return False
-    return getattr(module, kind.__name__, None) is kind
+    return kind in _openeye_potential_classes()
 
 
 # Every class in ``openeye.oeff`` that derives from ``OEMolFunc1`` and refuses construction:
