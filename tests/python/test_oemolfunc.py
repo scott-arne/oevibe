@@ -263,6 +263,62 @@ def test_a_python_subclass_cannot_spoof_the_name_of_a_real_potential():
         )
 
 
+def test_a_python_subclass_laundered_through_the_openeye_upcast_is_rejected():
+    """OpenEye's own upcast erases the subclass with nothing spoofed at all.
+
+    ``OEGenericFF.GetComponents()`` hands back a proxy whose exact type is ``oeff.OEMolFunc1``,
+    a class ``openeye.oeff`` genuinely exports, so the identity check above passes it. Accepting
+    it ran native MMFF while the caller believed the subclass was in play -- a silent wrong
+    answer, which is why the overridden method below has to stay uncalled.
+    """
+    calls = []
+
+    class Laundered(oeff.OEMMFF):
+        def CreateCopy(self):
+            calls.append("CreateCopy")
+            raise AssertionError("the subclass must never be used as a potential")
+
+    potential = Laundered(True)
+    holder = oeff.OEGenericFF()
+    assert holder.Add(potential)
+    upcast = holder.GetComponents()[0]
+    assert type(upcast) is oeff.OEMolFunc1
+
+    with pytest.raises(TypeError, match="upcast"):
+        oevibe.MolFuncEngine("laundered", "1.0", oevibe.Method("nope"), upcast)
+    assert calls == []
+
+
+def test_a_native_potential_laundered_the_same_way_is_rejected_just_as_hard():
+    """OEVibe refuses the upcast shape, not the subclass.
+
+    Nothing visible from Python separates this component from the laundered subclass above, so
+    an ordinary ``oeff.OEMMFF`` behind the same upcast is refused too. The potential itself is
+    still accepted -- that is what every fixture in this file passes.
+    """
+    potential = oeff.OEMMFF(True)
+    holder = oeff.OEGenericFF()
+    assert holder.Add(potential)
+    upcast = holder.GetComponents()[0]
+    assert type(upcast) is oeff.OEMolFunc1
+
+    with pytest.raises(TypeError, match="upcast"):
+        oevibe.MolFuncEngine("native-laundered", "1.0", oevibe.Method("nope"), upcast)
+
+
+def test_an_upcast_to_oemolfunc2_is_rejected_as_well():
+    """``OEGenericFF2`` returns its components as ``oeff.OEMolFunc2``, so rejecting the one
+    interface name ``OEMolFunc1`` would have left the same hole one class higher."""
+    potential = oeff.OEMMFF(True)
+    holder = oeff.OEGenericFF2()
+    assert holder.Add(potential)
+    upcast = holder.GetComponents()[0]
+    assert type(upcast) is oeff.OEMolFunc2
+
+    with pytest.raises(TypeError, match="upcast"):
+        oevibe.MolFuncEngine("molfunc2-laundered", "1.0", oevibe.Method("nope"), upcast)
+
+
 def test_the_raw_constructor_rejects_an_unadjusted_proxy():
     """The pointer inside an OEMMFF proxy is 48 bytes away from its OEMolFunc1 subobject."""
     from oevibe.oevibe import _MolFuncEngine
