@@ -571,6 +571,7 @@ from .engines import (
     ensure_engines_loaded,
     register_engine,
 )
+from .oemolfunc import MolFuncEngine
 from .oevibe import (
     Algorithm,
     BondOrder,
@@ -658,6 +659,7 @@ __all__ = [
     "Method",
     "MethodCapabilities",
     "MethodInfo",
+    "MolFuncEngine",
     "MolecularSystem",
     "OEVibeError",
     "OptimizationStats",

@@ -61,6 +61,11 @@ namespace OESystem {
     class OEMolRecord;
 }
 
+namespace OEMolPotential {
+    class OEMolFunc1;
+    class OEMolFunc2;
+}
+
 // ============================================================================
 // Cross-runtime SWIG compatibility layer
 // ============================================================================
@@ -159,6 +164,27 @@ DEFINE_OE_TYPE_CHECKER(oescalargrid, "openeye.oegrid", "OEScalarGrid")
 DEFINE_OE_TYPE_CHECKER(oereceptor,   "openeye.oedocking", "OEReceptor")
 
 #undef DEFINE_OE_TYPE_CHECKER
+
+// OEMolFunc1 is a virtual base of every OpenEye potential, so it does not sit at offset 0 of the
+// object a proxy points at (measured: +48 in OEMMFF) and there is no shared type table to adjust
+// the pointer with. oevibe.MolFuncEngine does the upcast with OpenEye's own runtime and passes the
+// resulting proxy here, whose exact type is OEMolFunc1 and whose pointer is already adjusted.
+// Accepting a subclass proxy instead would silently read 48 bytes short of the subobject.
+static PyObject* _oevibe_oe_molfunc1_exact_type = NULL;
+static bool _oevibe_is_exact_molfunc1(PyObject* obj) {
+    if (!_oevibe_oe_molfunc1_exact_type) {
+        PyObject* mod = PyImport_ImportModule("openeye.oeff");
+        if (mod) {
+            _oevibe_oe_molfunc1_exact_type = PyObject_GetAttrString(mod, "OEMolFunc1");
+            Py_DECREF(mod);
+        }
+        if (!_oevibe_oe_molfunc1_exact_type) {
+            PyErr_Clear();
+            return false;
+        }
+    }
+    return reinterpret_cast<PyObject*>(Py_TYPE(obj)) == _oevibe_oe_molfunc1_exact_type;
+}
 
 // ---- OEScalarGrid return-type helper (zero-copy pointer swap) ----
 static PyObject* _oevibe_wrap_as_oe_grid(OESystem::OEScalarGrid* grid) {
@@ -348,6 +374,27 @@ OE_CROSS_RUNTIME_NULLABLE_PTR_TYPEMAPS(OESystem::OEScalarGrid, _oevibe_is_oescal
 
 // ---- Docking (OEDocking) ----
 OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Expected OEReceptor object.")
+
+// ---- Potentials (OEMolPotential) ----
+// Not OE_CROSS_RUNTIME_REF_TYPEMAPS: that would accept every subclass proxy, and the pointer it
+// holds is the most-derived one. See _oevibe_is_exact_molfunc1 for why only the exact type is safe.
+%typemap(in) const OEMolPotential::OEMolFunc1& (void *argp = 0) {
+    if (!_oevibe_is_exact_molfunc1($input)) {
+        SWIG_exception_fail(SWIG_TypeError,
+                            "expected an openeye.oeff.OEMolFunc1 produced by "
+                            "oevibe.MolFuncEngine; pass the potential to oevibe.MolFuncEngine "
+                            "rather than constructing the wrapped class directly.");
+    }
+    argp = _oevibe_extract_swig_ptr($input);
+    if (!argp) {
+        SWIG_exception_fail(SWIG_NullReferenceError, "Null reference.");
+    }
+    $1 = reinterpret_cast< $1_ltype >(argp);
+}
+
+%typemap(typecheck, precedence=10) const OEMolPotential::OEMolFunc1& {
+    $1 = _oevibe_is_exact_molfunc1($input) ? 1 : 0;
+}
 
 // ============================================================================
 // GIL: held by default, released only for Energy, Gradient, Optimize, Frequencies, and Scan
@@ -946,6 +993,14 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 
 %include "oevibe/Constraints.h"
 %include "oevibe/Options.h"
+// EngineMolFunc is an OEMolPotential::OEMolFunc2 and could not be handed to OpenEye's Python
+// optimizers across the runtime boundary; oevibe.as_oemolfunc is the Python path (spec 8.8).
+%ignore OEVIBE::EngineMolFunc;
+// The Python factory oevibe.MolFuncEngine upcasts the potential before calling this; see the
+// OEMolFunc1 typemap above for why a direct call would be wrong.
+%rename("_MolFuncEngine") OEVIBE::MolFuncEngine;
+%shared_ptr(OEVIBE::MolFuncEngine)
+%include "oevibe/OEAdapters.h"
 // The member variables of the result structs are filled in C++, and Python receives them as
 // views into a result, so they are exposed without setters. A vector member would otherwise be
 // returned as a mutable DoubleVector view into the result; %naturalvar returns a tuple copy.

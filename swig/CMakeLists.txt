@@ -15,6 +15,7 @@ set(_OEVIBE_SWIG_DEPENDS
     ${CMAKE_SOURCE_DIR}/include/oevibe/EngineRegistry.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Constraints.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Options.h
+    ${CMAKE_SOURCE_DIR}/include/oevibe/OEAdapters.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Result.h
     ${CMAKE_SOURCE_DIR}/include/oevibe/Calculation.h
 )
