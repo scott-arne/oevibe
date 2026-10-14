@@ -1,56 +1,105 @@
-"""Bridges between OEVibe and OpenEye's potential and optimizer interfaces (spec 8.8)."""
+"""Bridges between OEVibe and OpenEye's potential and optimizer interfaces (spec 8.8).
+
+Spec 8.8 accepts OpenEye-defined potentials only, so the predicates below have to tell an
+OpenEye-defined class from anything else. What they achieve, and what they do not:
+
+- Every route that does not deliberately mutate module state is refused: a Python-defined
+  subclass, one that spoofs ``__module__`` or ``__name__``, one re-exported from ``openeye.oeff``
+  after OEVibe has looked at a potential, and an upcast proxy whose exact type is an abstract
+  interface, behind which nothing visible from Python identifies the potential.
+- A caller who rebinds an ``openeye`` module *before* OEVibe first reads it, forges ``__hash__``
+  and ``__eq__`` on a class to fake membership in a snapshot, or patches these functions
+  outright, still gets through. Nothing written in Python can prevent that.
+- Which is accepted. This is a guardrail against unsupported usage that would otherwise return a
+  silently wrong answer -- native MMFF numbers while the caller believes their own subclass is in
+  play -- not a security boundary.
+
+Every check is also import-order independent. OpenEye gives each of its binding modules its own
+proxy class for ``OEMolPotential::OEMolFunc1``, and the last module imported wins the shared SWIG
+type registry, so ``oeff.OEGenericFF.GetComponents()`` returns ``oequacpac.OEMolFunc1`` proxies in
+a process that imported the partial-charge toolkit. A class is therefore judged by the module it
+claims as its own, never against one module fixed in advance.
+"""
 
 from __future__ import annotations
 
+import importlib
+
 from .oevibe import OptionsError, _MolFuncEngine
 
-_OPENEYE_POTENTIAL_CLASSES: frozenset[type] | None = None
+_OPENEYE_POTENTIAL_CLASSES: dict[str, frozenset[type]] = {}
 
 
-def _openeye_potential_classes() -> frozenset[type]:
-    """:returns: Every class ``openeye.oeff`` exports that derives from ``OEMolFunc1``.
+def _openeye_module(kind):
+    """:returns: The ``openeye`` binding module ``kind`` belongs to, or ``None``.
 
-    Captured once, on the first potential OEVibe is asked about, and reused from then on. The
-    import stays inside the function because this module never imports ``openeye`` at ``oevibe``
+    OpenEye's SWIG proxies report a bare module name such as ``oeff`` or ``oequacpac``, which is
+    importable as ``openeye.<name>``; a Python-defined class reports its own module, which is
+    not. Resolving the name the class carries is what keeps the checks here independent of which
+    OpenEye modules the caller happened to import, and in which order.
+    """
+    try:
+        return importlib.import_module(f"openeye.{kind.__module__}")
+    except (AttributeError, ImportError, TypeError, ValueError):
+        return None
+
+
+def _openeye_potential_classes(module_name: str = "oeff") -> frozenset[type]:
+    """:returns: Every class ``openeye.<module_name>`` exports that derives from its
+        ``OEMolFunc1``; empty when the module wraps no potentials.
+
+    Captured once per module, on the first class OEVibe is asked about from it, and reused from
+    then on. The default is ``oeff``, where all 69 potentials a caller would name live; the other
+    modules that wrap ``OEMolFunc1`` are snapshotted only if a proxy of theirs turns up. The
+    imports stay inside the function because this module never imports ``openeye`` at ``oevibe``
     import time.
 
-    Snapshotting ``oeff`` alone is complete: all 69 ``OEMolFunc1`` subclasses live there, and the
-    other OpenEye modules that export an ``OEMolFunc1`` (``oeet``, ``oequacpac``, ``oeshape``)
-    export a *distinct* class whose instances fail the ``isinstance`` gate in :func:`_as_molfunc1`
-    before the snapshot is consulted. ``test_the_potential_snapshot_covers_every_oeff_potential``
-    and ``test_no_other_openeye_module_exports_an_oeff_potential`` fail if either stops holding.
+    :raises ImportError: When ``openeye.<module_name>`` does not exist. Nothing is cached then,
+        so a module that appears later is still read.
     """
-    global _OPENEYE_POTENTIAL_CLASSES
-    if _OPENEYE_POTENTIAL_CLASSES is None:
-        from openeye import oeff
-
+    snapshot = _OPENEYE_POTENTIAL_CLASSES.get(module_name)
+    if snapshot is None:
+        module = importlib.import_module(f"openeye.{module_name}")
+        base = getattr(module, "OEMolFunc1", None)
         # Attribute access only; constructing all 69 is far too expensive to do here, and the
         # enumeration does not need to know which of them are abstract.
-        _OPENEYE_POTENTIAL_CLASSES = frozenset(
-            candidate
-            for candidate in (getattr(oeff, name) for name in dir(oeff))
-            if isinstance(candidate, type) and issubclass(candidate, oeff.OEMolFunc1)
+        snapshot = (
+            frozenset(
+                candidate
+                for candidate in (getattr(module, name) for name in dir(module))
+                if isinstance(candidate, type) and issubclass(candidate, base)
+            )
+            if isinstance(base, type)
+            else frozenset()
         )
-    return _OPENEYE_POTENTIAL_CLASSES
+        _OPENEYE_POTENTIAL_CLASSES[module_name] = snapshot
+    return snapshot
 
 
 def _is_openeye_type(kind) -> bool:
     """:returns: Whether ``kind`` is one of the potential classes OpenEye itself defines.
 
-    Membership in the snapshot, not a live read of ``openeye.oeff``. A module is mutable, so
-    asking it what it exports *now* answered yes to any class assigned into it:
-    ``oeff.Reexported = Reexported`` made a Python-defined subclass pass, and ``MolFuncEngine``
-    then ran native MMFF while the caller believed the subclass was in play. Comparing against a
-    set captured before any of that happened closes it, and a frozenset lookup is also cheaper
-    than the ``import_module`` plus ``getattr`` it replaces -- a nice property, not the reason.
+    Membership in a snapshot, not a live read of the module. A module is mutable, so asking it
+    what it exports *now* answered yes to any class assigned into it:
+    ``oeff.Reexported = Reexported`` made a Python-defined subclass pass. A set captured before
+    any of that happened closes it, and a frozenset lookup is cheaper besides.
 
-    What this does NOT achieve: a caller who rebinds ``openeye.oeff``, or patches this module's
-    own state, *before* OEVibe's first potential check still defeats it, and so does one who
-    simply replaces this function. No predicate written in Python survives a caller willing to
-    mutate module state. This is a guardrail against unsupported usage that would otherwise
-    return a silently wrong answer, not a security boundary.
+    A miss falls through to the snapshot of the module ``kind`` claims, taking it if this is the
+    first class seen from there. Without that, a class from a module imported after the first
+    snapshot -- ``oequacpac.OEMolFunc1``, handed out by ``oeff`` itself once the partial-charge
+    toolkit is loaded -- was reported as Python-defined, which it is not. A module already
+    snapshotted is never re-read, so the rebinding above stays closed for it; a module not yet
+    seen is read as it stands, which is the cold-ordering hole the module docstring accepts.
     """
-    return kind in _openeye_potential_classes()
+    if kind in _openeye_potential_classes():
+        return True
+    module_name = getattr(kind, "__module__", "")
+    if module_name == "oeff":
+        return False
+    try:
+        return kind in _openeye_potential_classes(module_name)
+    except (ImportError, TypeError, ValueError):
+        return False
 
 
 # Every class in ``openeye.oeff`` that derives from ``OEMolFunc1`` and refuses construction:
@@ -80,14 +129,34 @@ _ABSTRACT_POTENTIAL_INTERFACES = (
 def _is_abstract_potential_interface(kind) -> bool:
     """:returns: Whether ``kind`` is one of OpenEye's abstract potential interfaces.
 
-    Identity again, and against a name list rather than a single name, because an upcast can
-    land on any of them. ``getattr`` tolerates an OpenEye release that does not export one.
+    A name list rather than a single name, because an upcast can land on any of them, and an
+    interface is just as abstract whichever OpenEye module's proxy class it is -- so the name is
+    matched first and then confirmed by identity against what ``kind``'s own module exports under
+    it. Identity is what a Python class claiming the name cannot have; ``getattr`` returning
+    ``None`` tolerates an OpenEye release that does not export one of these.
+    """
+    if kind.__name__ not in _ABSTRACT_POTENTIAL_INTERFACES:
+        return False
+    module = _openeye_module(kind)
+    return module is not None and getattr(module, kind.__name__, None) is kind
+
+
+def _is_molfunc1_instance(potential) -> bool:
+    """:returns: Whether ``potential`` is an ``OEMolFunc1`` of some OpenEye binding module.
+
+    The modules' potential hierarchies are disjoint: an ``oequacpac.OEMolFunc1`` proxy is not an
+    instance of ``oeff.OEMolFunc1``, so testing ``oeff`` alone turned away the very components
+    ``oeff`` hands out once the partial-charge toolkit is loaded. ``oeff`` is still tested first
+    and unconditionally, because that is what a Python-defined subclass derives from, and such a
+    subclass has to reach the spec 8.8 refusal below rather than be mistaken for a non-potential.
     """
     from openeye import oeff
 
-    return any(
-        kind is getattr(oeff, name, None) for name in _ABSTRACT_POTENTIAL_INTERFACES
-    )
+    if isinstance(potential, oeff.OEMolFunc1):
+        return True
+    module = _openeye_module(type(potential))
+    base = getattr(module, "OEMolFunc1", None) if module is not None else None
+    return isinstance(base, type) and isinstance(potential, base)
 
 
 def _as_molfunc1(potential):
@@ -99,9 +168,10 @@ def _as_molfunc1(potential):
     upcast; the component it returns does not own the potential.
 
     :param potential: An OpenEye-defined ``oeff.OEMolFunc1``.
-    :returns: ``(component, holder)``: a proxy of exact type ``oeff.OEMolFunc1`` pointing at
-        ``potential``, and the ``OEGenericFF`` it was read from, which the caller keeps alive
-        while it uses the component.
+    :returns: ``(component, holder)``: a proxy of exact type ``OEMolFunc1`` pointing at
+        ``potential`` -- from whichever OpenEye module last registered that class with SWIG, not
+        necessarily ``oeff`` -- and the ``OEGenericFF`` it was read from, which the caller keeps
+        alive while it uses the component.
     :raises TypeError: When ``potential`` is not an OpenEye ``OEMolFunc1``; is a Python-defined
         subclass of one, which spec 8.8 does not support in v1; or is itself an upcast proxy,
         whose provenance OEVibe cannot establish.
@@ -109,7 +179,7 @@ def _as_molfunc1(potential):
     """
     from openeye import oeff
 
-    if not isinstance(potential, oeff.OEMolFunc1):
+    if not _is_molfunc1_instance(potential):
         raise TypeError(
             f"expected an openeye.oeff.OEMolFunc1, got {type(potential).__name__}"
         )
@@ -125,10 +195,12 @@ def _as_molfunc1(potential):
         # Deliberately not phrased as "this is Python-defined": it may well not be. What OEVibe
         # knows is only that the proxy's exact type is an interface no object can be, so the
         # potential underneath is unidentifiable -- including as one spec 8.8 excludes.
+        kind = type(potential)
         raise TypeError(
-            f"this potential is an upcast proxy of exact type oeff.{type(potential).__name__}, "
-            "an abstract interface; OEVibe cannot establish which potential is underneath an "
-            "upcast and will not guess. Pass the original potential to MolFuncEngine instead."
+            f"this potential is an upcast proxy of exact type {kind.__module__}."
+            f"{kind.__name__}, an abstract interface; OEVibe cannot establish which potential "
+            "is underneath an upcast and will not guess. Pass the original potential to "
+            "MolFuncEngine instead."
         )
     holder = oeff.OEGenericFF()
     if not holder.Add(potential):

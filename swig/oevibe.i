@@ -170,20 +170,55 @@ DEFINE_OE_TYPE_CHECKER(oereceptor,   "openeye.oedocking", "OEReceptor")
 // the pointer with. oevibe.MolFuncEngine does the upcast with OpenEye's own runtime and passes the
 // resulting proxy here, whose exact type is OEMolFunc1 and whose pointer is already adjusted.
 // Accepting a subclass proxy instead would silently read 48 bytes short of the subobject.
-static PyObject* _oevibe_oe_molfunc1_exact_type = NULL;
+//
+// Every OpenEye binding module defines its OWN proxy class for OEMolPotential::OEMolFunc1, and the
+// last one imported wins the shared SWIG type registry: in a process that has imported
+// openeye.oequacpac, oeff.OEGenericFF.GetComponents() hands back oequacpac.OEMolFunc1 proxies.
+// Any module's OEMolFunc1 carries the adjusted pointer, so the class is recognised by provenance
+// -- it must BE what openeye.<its __module__> exports under OEMolFunc1 -- rather than compared
+// against one class cached in advance, which rejected legitimate callers by import order.
 static bool _oevibe_is_exact_molfunc1(PyObject* obj) {
-    if (!_oevibe_oe_molfunc1_exact_type) {
-        PyObject* mod = PyImport_ImportModule("openeye.oeff");
-        if (mod) {
-            _oevibe_oe_molfunc1_exact_type = PyObject_GetAttrString(mod, "OEMolFunc1");
-            Py_DECREF(mod);
-        }
-        if (!_oevibe_oe_molfunc1_exact_type) {
-            PyErr_Clear();
-            return false;
-        }
+    PyObject* type = reinterpret_cast<PyObject*>(Py_TYPE(obj));
+    // Cheap reject first: overload resolution runs this over every argument, and only a type
+    // named OEMolFunc1 is worth asking the import system about.
+    PyObject* name = PyObject_GetAttrString(type, "__name__");
+    if (!name) {
+        PyErr_Clear();
+        return false;
     }
-    return reinterpret_cast<PyObject*>(Py_TYPE(obj)) == _oevibe_oe_molfunc1_exact_type;
+    const bool named_molfunc1 = PyUnicode_Check(name) &&
+                                PyUnicode_CompareWithASCIIString(name, "OEMolFunc1") == 0;
+    Py_DECREF(name);
+    if (!named_molfunc1) {
+        return false;
+    }
+    PyObject* module_name = PyObject_GetAttrString(type, "__module__");
+    if (!module_name || !PyUnicode_Check(module_name)) {
+        Py_XDECREF(module_name);
+        PyErr_Clear();
+        return false;
+    }
+    PyObject* qualified = PyUnicode_FromFormat("openeye.%U", module_name);
+    Py_DECREF(module_name);
+    if (!qualified) {
+        PyErr_Clear();
+        return false;
+    }
+    PyObject* mod = PyImport_Import(qualified);
+    Py_DECREF(qualified);
+    if (!mod) {
+        PyErr_Clear();
+        return false;
+    }
+    PyObject* declared = PyObject_GetAttrString(mod, "OEMolFunc1");
+    Py_DECREF(mod);
+    if (!declared) {
+        PyErr_Clear();
+        return false;
+    }
+    bool exact = (declared == type);
+    Py_DECREF(declared);
+    return exact;
 }
 
 // ---- OEScalarGrid return-type helper (zero-copy pointer swap) ----

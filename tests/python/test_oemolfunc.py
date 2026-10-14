@@ -1,9 +1,11 @@
 """OpenEye potentials as OEVibe engines (spec 8.8)."""
 
 import gc
+import os
 import subprocess
 import sys
 import weakref
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -38,6 +40,76 @@ for info in pkgutil.iter_modules(openeye.__path__):
             strays.append("openeye." + info.name + "." + name)
 print(("STRAYS " + " ".join(strays)) if strays else "NO STRAYS")
 """
+
+# Importing a second OpenEye module that wraps OEMolPotential::OEMolFunc1 rebinds the proxy class
+# SWIG hands back for it process-wide, so both children below have to run in their own process.
+# openeye.oequacpac is the partial-charge toolkit: anyone assigning charges imports it.
+_OEQUACPAC_ENERGY_CHILD = """
+from openeye import oechem, oeff, oeomega, oequacpac  # noqa: F401
+
+import oevibe
+
+mol = oechem.OEMol()
+assert oechem.OESmilesToMol(mol, "CCCCO")
+options = oeomega.OEOmegaOptions()
+options.SetMaxConfs(1)
+assert oeomega.OEOmega(options).Build(mol) == oeomega.OEOmegaReturnCode_Success
+
+engine = oevibe.MolFuncEngine(
+    "oeff-molfunc-quacpac", "1.0", oevibe.Method("mmff94s-quacpac"), oeff.OEMMFF(True)
+)
+oevibe.register_engine(engine, replace=True)
+
+through_molfunc = oevibe.CalculationOptions()
+through_molfunc.SetMethod(oevibe.Method("mmff94s-quacpac"))
+through_oeff = oevibe.CalculationOptions()
+through_oeff.SetMethod(oevibe.Method("mmff94s"))
+mine = oevibe.Calculation(through_molfunc).Energy(oechem.OEMol(mol)).Get(0)
+theirs = oevibe.Calculation(through_oeff).Energy(oechem.OEMol(mol)).Get(0)
+assert mine.GetStatus() == oevibe.ConformerStatus.OK, mine.GetMessage()
+print("ENERGIES", repr(mine.GetEnergy()), repr(theirs.GetEnergy()))
+"""
+
+_OEQUACPAC_UPCAST_CHILD = """
+from openeye import oeff, oequacpac  # noqa: F401
+
+import oevibe
+
+holder = oeff.OEGenericFF()
+assert holder.Add(oeff.OEMMFF(True))
+upcast = holder.GetComponents()[0]
+print("EXACT_TYPE", type(upcast).__module__ + "." + type(upcast).__name__)
+try:
+    oevibe.MolFuncEngine("quacpac-upcast", "1.0", oevibe.Method("nope"), upcast)
+except TypeError as error:
+    print("REJECTED", " ".join(str(error).split()))
+else:
+    print("ACCEPTED")
+"""
+
+
+def _child_environment():
+    """:returns: ``os.environ`` with this ``oevibe`` on ``PYTHONPATH`` for a child process."""
+    environment = dict(os.environ)
+    package_root = str(Path(oevibe.__file__).resolve().parent.parent)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [package_root, *filter(None, [environment.get("PYTHONPATH")])]
+    )
+    return environment
+
+
+def _run_child(source):
+    """:returns: The stdout of ``source`` run in a fresh interpreter; fails on a crash."""
+    child = subprocess.run(
+        [sys.executable, "-c", source],
+        env=_child_environment(),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
+    return child.stdout
 
 
 @pytest.fixture
@@ -354,6 +426,37 @@ def test_no_other_openeye_module_exports_an_oeff_potential():
     )
     assert child.returncode == 0, child.stderr
     assert child.stdout.strip().splitlines()[-1] == "NO STRAYS", child.stdout
+
+
+def test_a_potential_still_works_when_oequacpac_was_imported_first():
+    """Every OpenEye module defines its own ``OEMolFunc1`` proxy and the last import wins.
+
+    After ``import openeye.oequacpac``, ``oeff.OEGenericFF.GetComponents()`` hands back
+    ``oequacpac.OEMolFunc1`` proxies, which a guard that compares against ``oeff.OEMolFunc1``
+    alone turns away -- so the documented ``MolFuncEngine(oeff.OEMMFF(True))`` failed for anyone
+    who had also imported the partial-charge toolkit. The energy is matched against the built-in
+    ``oeff`` engine inside the child, because a guard that admitted an unadjusted pointer would
+    not produce one.
+    """
+    report = _run_child(_OEQUACPAC_ENERGY_CHILD).strip().splitlines()[-1]
+    label, mine, theirs = report.split()
+    assert label == "ENERGIES", report
+    assert float(mine) == pytest.approx(float(theirs), abs=1e-9)
+
+
+def test_an_upcast_is_still_rejected_when_oequacpac_was_imported_first():
+    """The upcast guard has to recognise any OpenEye module's abstract interface, not oeff's.
+
+    The component below is an ``oequacpac.OEMolFunc1``, which the ``oeff``-only identity tests
+    did not know. It was still refused, but as something that is not a potential at all, and a
+    caller cannot act on that: the fix has to say what is actually wrong with it.
+    """
+    lines = _run_child(_OEQUACPAC_UPCAST_CHILD).strip().splitlines()
+    assert "EXACT_TYPE oequacpac.OEMolFunc1" in lines, lines
+    rejection = lines[-1]
+    assert rejection.startswith("REJECTED "), lines
+    assert "upcast proxy of exact type oequacpac.OEMolFunc1" in rejection, rejection
+    assert "Python-defined" not in rejection, rejection
 
 
 def test_a_python_subclass_laundered_through_the_openeye_upcast_is_rejected():
