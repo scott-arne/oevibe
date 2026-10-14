@@ -442,3 +442,35 @@ def test_a_python_subclass_of_the_native_engine_is_still_retained():
         replace=True,
     )
     assert len(_proxy._REGISTERED_ENGINES) == before + 1
+
+
+def test_the_abstract_interface_list_still_matches_the_installed_openeye():
+    """``_ABSTRACT_POTENTIAL_INTERFACES`` is a literal tuple, so an OpenEye release that adds an
+    abstract potential interface would silently reopen the upcast-laundering hole. Re-derive the
+    set here and fail on drift.
+
+    Constructing all 69 subclasses is far too expensive for the guard itself, which runs on every
+    legitimate call, but it costs about 20 ms once in a test. The two abstract signals are
+    distinct from the ``TypeError`` a concrete class raises about its arguments.
+    """
+    from oevibe.oemolfunc import _ABSTRACT_POTENTIAL_INTERFACES
+
+    abstract = set()
+    for name in dir(oeff):
+        candidate = getattr(oeff, name)
+        if not isinstance(candidate, type) or not issubclass(
+            candidate, oeff.OEMolFunc1
+        ):
+            continue
+        try:
+            candidate()
+        except AttributeError as error:
+            if "class is abstract" in str(error):
+                abstract.add(name)
+        except RuntimeError as error:
+            if "abstract class or protected constructor" in str(error):
+                abstract.add(name)
+        except TypeError:
+            pass  # A concrete class complaining about its constructor arguments.
+
+    assert abstract == set(_ABSTRACT_POTENTIAL_INTERFACES)
