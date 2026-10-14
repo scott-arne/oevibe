@@ -382,6 +382,20 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 %include "stdint.i"
 %include "exception.i"
 
+// std_vector.i wraps front(), back() and pop_back() straight onto the C++ methods, so calling any
+// of them on an empty vector is undefined behavior rather than an IndexError, and get_allocator
+// only hands back an opaque proxy. Nothing in OEVibe needs them, so every wrapped vector drops
+// them; pop() stays because std_vector.i range-checks it.
+%define OEVIBE_SAFE_VECTOR(Vector...)
+%ignore Vector::front;
+%ignore Vector::back;
+%ignore Vector::pop_back;
+%ignore Vector::get_allocator;
+%enddef
+
+OEVIBE_SAFE_VECTOR(std::vector<double>)
+OEVIBE_SAFE_VECTOR(std::vector<unsigned int>)
+OEVIBE_SAFE_VECTOR(std::vector<std::string>)
 %template(DoubleVector) std::vector<double>;
 %template(UnsignedVector) std::vector<unsigned int>;
 %template(StringVector) std::vector<std::string>;
@@ -620,7 +634,7 @@ than one thread at a time."
 %ignore std::vector<OEVIBE::BondOrder>::resize;
 %ignore std::vector<OEVIBE::BondOrder>::reserve;
 %ignore std::vector<OEVIBE::BondOrder>::pop;
-%ignore std::vector<OEVIBE::BondOrder>::pop_back;
+OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::BondOrder>)
 %ignore std::vector<OEVIBE::BondOrder>::erase;
 %ignore std::vector<OEVIBE::BondOrder>::clear;
 %ignore std::vector<OEVIBE::BondOrder>::swap;
