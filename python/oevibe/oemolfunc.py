@@ -19,6 +19,9 @@ proxy class for ``OEMolPotential::OEMolFunc1``, and the last module imported win
 type registry, so ``oeff.OEGenericFF.GetComponents()`` returns ``oequacpac.OEMolFunc1`` proxies in
 a process that imported the partial-charge toolkit. A class is therefore judged by the module it
 claims as its own, never against one module fixed in advance.
+
+That claimed name is also import-*form* dependent -- ``oeff`` or ``openeye.oeff``, see
+:func:`_openeye_leaf_name` -- so it is normalised before it is used for anything.
 """
 
 from __future__ import annotations
@@ -30,16 +33,30 @@ from .oevibe import OptionsError, _MolFuncEngine
 _OPENEYE_POTENTIAL_CLASSES: dict[str, frozenset[type]] = {}
 
 
+def _openeye_leaf_name(module_name: str) -> str:
+    """:returns: ``module_name`` without the ``openeye.`` package prefix.
+
+    Which of the two forms a class reports in ``__module__`` is the caller's import statement,
+    not a property of the class: ``openeye/__init__.py`` replaces itself with a lazy module that
+    loads each submodule under its bare name, so ``from openeye import oeff`` yields classes
+    reporting ``oeff``, while ``import openeye.oeff`` goes through the ordinary submodule
+    machinery and yields ``openeye.oeff``. Both name the one module the process has. The leaf is
+    the normal form everything below uses -- for the import, for the snapshot cache key and for
+    the messages -- so that the caller's import style cannot change an answer or a diagnostic.
+    """
+    return module_name.removeprefix("openeye.")
+
+
 def _openeye_module(kind):
     """:returns: The ``openeye`` binding module ``kind`` belongs to, or ``None``.
 
-    OpenEye's SWIG proxies report a bare module name such as ``oeff`` or ``oequacpac``, which is
-    importable as ``openeye.<name>``; a Python-defined class reports its own module, which is
+    OpenEye's SWIG proxies report a module name such as ``oeff`` or ``oequacpac``, which is
+    importable as ``openeye.<leaf>``; a Python-defined class reports its own module, which is
     not. Resolving the name the class carries is what keeps the checks here independent of which
     OpenEye modules the caller happened to import, and in which order.
     """
     try:
-        return importlib.import_module(f"openeye.{kind.__module__}")
+        return importlib.import_module(f"openeye.{_openeye_leaf_name(kind.__module__)}")
     except (AttributeError, ImportError, TypeError, ValueError):
         return None
 
@@ -54,9 +71,13 @@ def _openeye_potential_classes(module_name: str = "oeff") -> frozenset[type]:
     imports stay inside the function because this module never imports ``openeye`` at ``oevibe``
     import time.
 
+    ``module_name`` is normalised to its leaf before anything else, so the two import forms of
+    one module share a single cache entry rather than snapshotting it twice.
+
     :raises ImportError: When ``openeye.<module_name>`` does not exist. Nothing is cached then,
         so a module that appears later is still read.
     """
+    module_name = _openeye_leaf_name(module_name)
     snapshot = _OPENEYE_POTENTIAL_CLASSES.get(module_name)
     if snapshot is None:
         module = importlib.import_module(f"openeye.{module_name}")
@@ -93,7 +114,7 @@ def _is_openeye_type(kind) -> bool:
     """
     if kind in _openeye_potential_classes():
         return True
-    module_name = getattr(kind, "__module__", "")
+    module_name = _openeye_leaf_name(getattr(kind, "__module__", ""))
     if module_name == "oeff":
         return False
     try:
@@ -196,8 +217,10 @@ def _as_molfunc1(potential):
         # knows is only that the proxy's exact type is an interface no object can be, so the
         # potential underneath is unidentifiable -- including as one spec 8.8 excludes.
         kind = type(potential)
+        # The leaf, so that one class is named one way whichever import form the caller used.
+        module_name = _openeye_leaf_name(kind.__module__)
         raise TypeError(
-            f"this potential is an upcast proxy of exact type {kind.__module__}."
+            f"this potential is an upcast proxy of exact type {module_name}."
             f"{kind.__name__}, an abstract interface; OEVibe cannot establish which potential "
             "is underneath an upcast and will not guess. Pass the original potential to "
             "MolFuncEngine instead."

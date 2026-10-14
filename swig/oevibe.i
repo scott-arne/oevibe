@@ -177,6 +177,11 @@ DEFINE_OE_TYPE_CHECKER(oereceptor,   "openeye.oedocking", "OEReceptor")
 // Any module's OEMolFunc1 carries the adjusted pointer, so the class is recognised by provenance
 // -- it must BE what openeye.<its __module__> exports under OEMolFunc1 -- rather than compared
 // against one class cached in advance, which rejected legitimate callers by import order.
+//
+// That __module__ already carries the openeye. prefix when the caller wrote `import openeye.oeff`
+// rather than `from openeye import oeff`, so it is normalised to the leaf before being qualified;
+// prepending unconditionally sent this looking for openeye.openeye.oeff and refused every
+// potential. oevibe.oemolfunc._openeye_leaf_name is the Python side of the same normalisation.
 static bool _oevibe_is_exact_molfunc1(PyObject* obj) {
     PyObject* type = reinterpret_cast<PyObject*>(Py_TYPE(obj));
     // Cheap reject first: overload resolution runs this over every argument, and only a type
@@ -198,8 +203,14 @@ static bool _oevibe_is_exact_molfunc1(PyObject* obj) {
         PyErr_Clear();
         return false;
     }
-    PyObject* qualified = PyUnicode_FromFormat("openeye.%U", module_name);
+    PyObject* leaf = PyObject_CallMethod(module_name, "removeprefix", "s", "openeye.");
     Py_DECREF(module_name);
+    if (!leaf) {
+        PyErr_Clear();
+        return false;
+    }
+    PyObject* qualified = PyUnicode_FromFormat("openeye.%U", leaf);
+    Py_DECREF(leaf);
     if (!qualified) {
         PyErr_Clear();
         return false;

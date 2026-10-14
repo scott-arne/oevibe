@@ -87,6 +87,65 @@ else:
     print("ACCEPTED")
 """
 
+# A proxy class's __module__ follows how its OpenEye module was imported. openeye/__init__.py
+# replaces itself with a lazy module whose __getattr__ loads each submodule under its BARE name,
+# so ``from openeye import oeff`` yields classes reporting ``oeff``; ``import openeye.oeff`` goes
+# through the ordinary submodule machinery instead and yields ``openeye.oeff``. Both name the one
+# module the process has, so both forms have to resolve to it. The form is a property of the
+# interpreter, so each one needs its own process.
+_IMPORT_FORMS = (
+    pytest.param("from openeye import oeff", "oeff", id="from-openeye-import"),
+    pytest.param(
+        "import openeye.oeff as oeff", "openeye.oeff", id="import-openeye-dot"
+    ),
+)
+
+_IMPORT_FORM_ENERGY_CHILD = """
+{import_form}
+from openeye import oechem, oeomega
+
+import oevibe
+
+print("MODULE", oeff.OEMMFF.__module__)
+
+mol = oechem.OEMol()
+assert oechem.OESmilesToMol(mol, "CCCCO")
+build_options = oeomega.OEOmegaOptions()
+build_options.SetMaxConfs(1)
+assert oeomega.OEOmega(build_options).Build(mol) == oeomega.OEOmegaReturnCode_Success
+
+engine = oevibe.MolFuncEngine(
+    "oeff-molfunc-form", "1.0", oevibe.Method("mmff94s-form"), oeff.OEMMFF(True)
+)
+oevibe.register_engine(engine, replace=True)
+
+through_molfunc = oevibe.CalculationOptions()
+through_molfunc.SetMethod(oevibe.Method("mmff94s-form"))
+through_oeff = oevibe.CalculationOptions()
+through_oeff.SetMethod(oevibe.Method("mmff94s"))
+mine = oevibe.Calculation(through_molfunc).Energy(oechem.OEMol(mol)).Get(0)
+theirs = oevibe.Calculation(through_oeff).Energy(oechem.OEMol(mol)).Get(0)
+assert mine.GetStatus() == oevibe.ConformerStatus.OK, mine.GetMessage()
+print("ENERGIES", repr(mine.GetEnergy()), repr(theirs.GetEnergy()))
+"""
+
+_IMPORT_FORM_UPCAST_CHILD = """
+{import_form}
+
+import oevibe
+
+print("MODULE", oeff.OEMolFunc1.__module__)
+holder = oeff.OEGenericFF()
+assert holder.Add(oeff.OEMMFF(True))
+upcast = holder.GetComponents()[0]
+try:
+    oevibe.MolFuncEngine("form-upcast", "1.0", oevibe.Method("nope"), upcast)
+except TypeError as error:
+    print("REJECTED", " ".join(str(error).split()))
+else:
+    print("ACCEPTED")
+"""
+
 
 def _child_environment():
     """:returns: ``os.environ`` with this ``oevibe`` on ``PYTHONPATH`` for a child process."""
@@ -343,6 +402,30 @@ def test_a_python_subclass_of_an_openeye_potential_cannot_spoof_its_module():
     assert calls == []
 
 
+def test_a_python_subclass_cannot_spoof_the_qualified_module_name_either():
+    """Normalising ``openeye.oeff`` to ``oeff`` must not hand a spoofer a resolvable module.
+
+    The prefixed form used to be unresolvable by accident -- it was looked up as
+    ``openeye.openeye.oeff`` -- which is exactly the bug that broke the honest callers above.
+    Now that it resolves, the spoof reaches the same identity test the bare form does, and has
+    to fail it there rather than anywhere upstream.
+    """
+    calls = []
+
+    class Spoofed(oeff.OEMMFF):
+        __module__ = "openeye.oeff"
+
+        def CreateCopy(self):
+            calls.append("CreateCopy")
+            raise AssertionError("the subclass must never be used as a potential")
+
+    with pytest.raises(TypeError, match="PythonEngine"):
+        oevibe.MolFuncEngine(
+            "spoofed-qualified", "1.0", oevibe.Method("nope"), Spoofed(True)
+        )
+    assert calls == []
+
+
 def test_a_python_subclass_cannot_spoof_the_name_of_a_real_potential():
     """Spoofing ``__name__`` as well still fails: ``oeff.OEMMFF`` is not this class."""
 
@@ -456,6 +539,48 @@ def test_an_upcast_is_still_rejected_when_oequacpac_was_imported_first():
     rejection = lines[-1]
     assert rejection.startswith("REJECTED "), lines
     assert "upcast proxy of exact type oequacpac.OEMolFunc1" in rejection, rejection
+    assert "Python-defined" not in rejection, rejection
+
+
+@pytest.mark.parametrize(("import_form", "expected_module"), _IMPORT_FORMS)
+def test_a_potential_works_under_either_import_form(import_form, expected_module):
+    """``import openeye.oeff`` used to break every potential, and nothing here had noticed.
+
+    The module name a proxy class reports is the caller's import form, not a property of the
+    potential, so resolving it has to tolerate the ``openeye.`` prefix already being there. It
+    did not: the qualified form sent the guards looking for ``openeye.openeye.oeff``, and
+    ``MolFuncEngine`` then refused ``OEMMFF``, ``OESmirnoff``, ``OESage`` and
+    ``OEHarmonicPotential`` alike. The energy is matched against the built-in ``oeff`` engine
+    inside the child, because a guard that admitted an unadjusted pointer would not produce one.
+    """
+    lines = _run_child(_IMPORT_FORM_ENERGY_CHILD.format(import_form=import_form))
+    reported = next(line for line in lines.splitlines() if line.startswith("MODULE "))
+    assert reported == f"MODULE {expected_module}", (
+        "OpenEye no longer varies __module__ with the import form, so this case no longer "
+        f"covers what it claims to: {reported}"
+    )
+    label, mine, theirs = lines.strip().splitlines()[-1].split()
+    assert label == "ENERGIES", lines
+    assert float(mine) == pytest.approx(float(theirs), abs=1e-9)
+
+
+@pytest.mark.parametrize(("import_form", "expected_module"), _IMPORT_FORMS)
+def test_an_upcast_is_rejected_the_same_way_under_either_import_form(
+    import_form, expected_module
+):
+    """The guards must still refuse under the qualified form, and say the same thing.
+
+    An unresolvable module name made ``_is_abstract_potential_interface`` answer no, which left
+    the upcast to die on the native typemap's arity error instead -- refused, but telling the
+    caller nothing. The reported type is normalised too, so one class cannot produce two
+    different messages depending on how the caller wrote their import.
+    """
+    lines = _run_child(_IMPORT_FORM_UPCAST_CHILD.format(import_form=import_form))
+    reported = next(line for line in lines.splitlines() if line.startswith("MODULE "))
+    assert reported == f"MODULE {expected_module}", reported
+    rejection = lines.strip().splitlines()[-1]
+    assert rejection.startswith("REJECTED "), lines
+    assert "upcast proxy of exact type oeff.OEMolFunc1" in rejection, rejection
     assert "Python-defined" not in rejection, rejection
 
 
