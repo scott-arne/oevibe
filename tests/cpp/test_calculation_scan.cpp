@@ -309,6 +309,12 @@ TEST(CalculationScanTest, ButaneMmff94ProfileHasTheExpectedShape) {
     EXPECT_EQ(resolved.at("task"), "scan");
     EXPECT_EQ(resolved.at("scan.max_optimizations"), "240");
     EXPECT_EQ(resolved.at("optimizer.algorithm"), "anc_rfo");
+    // A scan records its own dihedral constraints under scan.*, and passes only the caller's
+    // constraint set to add_optimizer_options; this scan sets none, so these stay empty. If the
+    // grid point's augmented set ever leaked in here, every scan's options digest would change.
+    EXPECT_EQ(resolved.at("optimizer.constraints"), "");
+    EXPECT_EQ(resolved.at("optimizer.frozen_atoms"), "");
+    EXPECT_EQ(resolved.at("optimizer.restraints"), "");
     EXPECT_EQ(scan.GetProvenance().method, "mmff94");
     // A scan writes nothing back.
     EXPECT_EQ(coordinates_of(*mol.GetActive()), before);

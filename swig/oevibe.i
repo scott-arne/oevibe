@@ -787,6 +787,24 @@ than one thread at a time."
 %include "oevibe/Preset.h"
 %include "oevibe/Solvent.h"
 %include "oevibe/Property.h"
+
+// SWIG maps operator== to __eq__, which makes Python drop the default __hash__ and leaves these
+// value types unusable as dictionary keys. Both hash on exactly what __eq__ compares:
+// Method::operator== compares the (lowercased) name and Solvent::operator== the name and model.
+%extend OEVIBE::Method {
+%pythoncode %{
+    def __hash__(self):
+        return hash(self.GetName())
+%}
+}
+
+%extend OEVIBE::Solvent {
+%pythoncode %{
+    def __hash__(self):
+        return hash((self.GetName(), int(self.GetModel())))
+%}
+}
+
 // Results hand out bond orders as copies and nothing in Python passes a vector to C++, so this
 // one takes the read-only treatment the macro describes.
 OEVIBE_READONLY_VECTOR(std::vector<OEVIBE::BondOrder>)

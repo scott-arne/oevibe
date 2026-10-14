@@ -25,8 +25,10 @@ _UNSIGNED_MAX = 2**32 - 1
 
 
 def _checked_int(name: str, value: Any, minimum: int, maximum: int) -> int:
-    # SWIG rejects integers outside the C parameter's range with OverflowError; the verbs
-    # report every invalid option as OptionsError instead.
+    # SWIG rejects integers outside the C parameter's range with OverflowError, truncates a
+    # float, and reads True as 1; the verbs report every invalid option as OptionsError.
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise _core.OptionsError(f"{name} must be an integer, got {value!r}")
     number = int(value)
     if number < minimum:
         raise _core.OptionsError(f"{name} must be at least {minimum}, got {number}")
@@ -36,23 +38,39 @@ def _checked_int(name: str, value: Any, minimum: int, maximum: int) -> int:
 
 
 def _checked_float(name: str, value: Any) -> float:
-    # SWIG raises TypeError for a value it cannot convert to a double; the verbs report every
-    # invalid option as OptionsError, and the C++ setters check the range.
-    try:
-        return float(value)
-    except (TypeError, ValueError, OverflowError):
-        raise _core.OptionsError(f"{name} must be a number, got {value!r}") from None
+    # SWIG raises TypeError for a value it cannot convert to a double and reads True as 1.0; the
+    # verbs report every invalid option as OptionsError, and the C++ setters check the range.
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise _core.OptionsError(f"{name} must be a number, got {value!r}")
+    return float(value)
+
+
+def _enum_value(name: str, value: Any, table: Mapping[str, int], expected: str) -> int:
+    """:returns: The enumerator for a name, or an integer that is one of the enumerators.
+
+    SWIG would accept any integer and reject an out-of-range one with ``OverflowError``, so the
+    check happens here where every invalid option is an ``OptionsError``.
+
+    :raises OptionsError: For an unknown name, a non-integer, or an integer outside the enum.
+    """
+    if isinstance(value, str):
+        try:
+            return table[value.lower()]
+        except KeyError:
+            raise _core.OptionsError(
+                f"unknown {name} {value!r}; expected {expected}"
+            ) from None
+    # bool is an Integral, and True would silently mean the enumerator numbered 1.
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise _core.OptionsError(f"{name} must be a name or an integer, got {value!r}")
+    number = int(value)
+    if number not in set(table.values()):
+        raise _core.OptionsError(f"unknown {name} {number}; expected {expected}")
+    return number
 
 
 def _preset(value: Any) -> int:
-    if isinstance(value, str):
-        try:
-            return _PRESETS[value.lower()]
-        except KeyError:
-            raise _core.OptionsError(
-                f"unknown preset {value!r}; expected fast, standard, or thorough"
-            ) from None
-    return int(value)
+    return _enum_value("preset", value, _PRESETS, "fast, standard, or thorough")
 
 
 def _solvent(value: Any) -> Any:
@@ -66,15 +84,9 @@ def _solvent(value: Any) -> Any:
 def _properties(values: Iterable[Any]) -> int:
     mask = 0
     for value in values:
-        if isinstance(value, str):
-            try:
-                mask |= _PROPERTIES[value.lower()]
-            except KeyError:
-                raise _core.OptionsError(
-                    f"unknown property {value!r}; expected one of {sorted(_PROPERTIES)}"
-                ) from None
-        else:
-            mask |= int(value)
+        mask |= _enum_value(
+            "property", value, _PROPERTIES, f"one of {sorted(_PROPERTIES)}"
+        )
     return mask
 
 
@@ -187,14 +199,7 @@ _ALGORITHMS = {
 
 
 def _algorithm(value: Any) -> int:
-    if isinstance(value, str):
-        try:
-            return _ALGORITHMS[value.lower()]
-        except KeyError:
-            raise _core.OptionsError(
-                f"unknown algorithm {value!r}; expected auto, anc_rfo, or lbfgs"
-            ) from None
-    return int(value)
+    return _enum_value("algorithm", value, _ALGORITHMS, "auto, anc_rfo, or lbfgs")
 
 
 def optimize(
@@ -328,14 +333,6 @@ def _angle_range(value: Any) -> tuple[float, float]:
     )
 
 
-def _optimization_cap(value: Any) -> int:
-    # _checked_int would truncate 1.5 and True to 1 and let a string or a non-finite float raise
-    # ValueError or OverflowError, so the cap must already be an integer here.
-    if not isinstance(value, numbers.Integral) or isinstance(value, bool):
-        raise _core.OptionsError(f"max_optimizations must be an integer, got {value!r}")
-    return _checked_int("max_optimizations", value, 1, _UNSIGNED_MAX)
-
-
 def scan(
     mol: Any,
     dihedrals: Iterable[Any],
@@ -394,5 +391,7 @@ def scan(
     scan_options.SetStep(_checked_float("step", step))
     scan_options.SetRange(*_angle_range(angle_range))
     if max_optimizations is not None:
-        scan_options.SetMaxOptimizations(_optimization_cap(max_optimizations))
+        scan_options.SetMaxOptimizations(
+            _checked_int("max_optimizations", max_optimizations, 1, _UNSIGNED_MAX)
+        )
     return _core.Calculation(options).Scan(mol, scan_options)
