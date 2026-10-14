@@ -82,9 +82,9 @@ def MolFuncEngine(name, version, method, potential, requires_partial_charges=Fal
     :raises TypeError: When ``potential`` is not an OpenEye ``OEMolFunc1``.
     :raises OptionsError: When the potential cannot be copied or OpenEye refuses to hold it.
     """
-    upcast, holder = _as_molfunc1(potential)
-    try:
-        return _MolFuncEngine(name, version, method, upcast, requires_partial_charges)
-    finally:
-        # The holder only borrows the potential, but it must outlive the constructor's read.
-        del holder
+    # ``upcast`` points into the OEGenericFF that ``_holder`` owns, so that holder has to still
+    # be alive when the constructor reads the potential. The local binding is what keeps it
+    # alive, and it lasts until this function returns; nothing further is needed, and a
+    # ``del`` at the end of the frame would do nothing at all.
+    upcast, _holder = _as_molfunc1(potential)
+    return _MolFuncEngine(name, version, method, upcast, requires_partial_charges)
