@@ -8,9 +8,13 @@ not compose: an ``as_oemolfunc`` adapter is a Python-defined subclass, which the
 ``oevibe`` does not pull the toolkit in.
 
 The predicates in between belong to the inbound half, the only one that has to judge what it was
-handed. The outbound half builds the class it hands out, so it judges nothing; what it has
-instead is an ownership split to know before reading it, ``CreateCopy`` being OpenEye's
-caller-owns hook and ``Copy`` the Python-owned sibling.
+handed. The outbound half judges nothing, since it builds the class it hands out; what it has
+instead are two conventions to know before reading it. One is an ownership split, ``CreateCopy``
+being OpenEye's caller-owns hook and ``Copy`` the Python-owned sibling. The other is that its
+``__call__`` never raises: an exception leaving a director becomes a
+``Swig::DirectorMethodException`` that nothing in OpenEye's optimizers catches, which aborts the
+process, so a failed evaluation is recorded, warned about and reported as an infinite energy
+instead.
 
 Spec 8.8 accepts OpenEye-defined potentials only, so the predicates below have to tell an
 OpenEye-defined class from anything else. What they achieve, and what they do not:
@@ -38,8 +42,10 @@ That claimed name is also import-*form* dependent -- ``oeff`` or ``openeye.oeff`
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import importlib
+import warnings
 
 import numpy as np
 
@@ -311,12 +317,40 @@ def _accumulate(buffer, values):
         buffer[index] += value
 
 
+# What a failed evaluation reports to OpenEye in place of an energy, paired with no gradient
+# contribution at all. An exception is not available: leaving a director it becomes a
+# Swig::DirectorMethodException, OpenEye's optimizers install no handler for one, and the
+# process aborts -- so the choice is between a value and a crash, and the only question is
+# which value.
+#
+# Measured in OEBFGSOpt against an ill-conditioned quadratic that takes 43 evaluations to
+# minimize unimpeded, failing at several points in the run: +inf, 1e30 and 1e12 all make the
+# line search REJECT the failed step, so the geometry left in the output buffer is one that
+# evaluated successfully, while nan, -inf and 0.0 are accepted and the caller is handed the
+# failed point. Every candidate terminated within three evaluations of the failure, the zero
+# gradient being what ends the run, so promptness did not separate them and step rejection did.
+# +inf over a large finite value because a finite one is a plausible energy: a caller sanity-
+# checking magnitudes cannot tell 1e30 kcal/mol from a real number out of a broken engine,
+# where an infinity says exactly what happened. +inf over nan because nan compares false
+# against everything, so ``energy < threshold`` silently fails closed and arithmetic downstream
+# spreads it without a trace.
+_FAILED_EVALUATION_ENERGY = float("inf")
+
+
 def as_oemolfunc(options):
     """OEVibe as an ``openeye.oeff.OEMolFunc1``, for OpenEye's optimizers (spec 8.8).
 
     The returned object resolves and validates the engine at construction, builds its system and
     session in ``Setup(mol)``, and reports energies in kcal/mol and gradients in
     kcal/mol/Angstrom in the OpenEye layout of the molecule it was set up on.
+
+    **Calling it never raises, so a caller driving an OpenEye optimizer must check
+    ``GetEvaluationError()`` on the returned object when the run finishes.** An exception cannot
+    cross OpenEye's director -- SWIG turns one into a ``Swig::DirectorMethodException``, nothing
+    in OpenEye's optimizers catches it, and the process aborts -- so a failed evaluation warns,
+    contributes nothing to the gradient and reports an infinite energy, which stops the
+    optimizer. ``GetEvaluationError()`` returns the first exception an evaluation raised, or
+    ``None`` if none did; a run that hit one has a meaningless result, whatever it returned.
 
     :param options: An ``oevibe.CalculationOptions``.
     :returns: An ``openeye.oeff.OEMolFunc1`` subclass instance. It is not thread-safe; its
@@ -343,6 +377,9 @@ def as_oemolfunc(options):
         ``EngineMolFunc`` copied them at construction, and both copy methods go through C++, so
         a copy inherits that snapshot rather than re-reading a proxy the caller may have edited
         since.
+
+        Calling it never raises; a failed evaluation is reported through
+        :meth:`GetEvaluationError` instead.
         """
 
         def __init__(self, calculation_options=None, function=None):
@@ -352,6 +389,8 @@ def as_oemolfunc(options):
                 if function is not None
                 else _EngineMolFunc(calculation_options)
             )
+            # Per adapter, not per copy: a copy is a different calculation and starts clean.
+            self._evaluation_error: Exception | None = None
 
         def CreateCopy(self):
             """OpenEye's copy hook, for OpenEye's C++ to call.
@@ -389,12 +428,57 @@ def as_oemolfunc(options):
         def GetFComponents(self, coords):
             return None
 
+        def GetEvaluationError(self):
+            """The first exception an evaluation raised, or ``None`` if none has.
+
+            The one thing that has to be read after driving an OpenEye optimizer with this
+            adapter: ``__call__`` cannot raise, so nothing else distinguishes a run that failed
+            from one that succeeded.
+
+            The FIRST failure, because an optimizer makes a step or two more after the one that
+            failed and those fail for the same underlying reason, so the first is the one that
+            explains the run. It is kept for the life of the adapter and never cleared; for an
+            unrelated run, start from a fresh adapter or a :meth:`Copy`, which begins clean.
+
+            :returns: The exception, or ``None``.
+            """
+            return self._evaluation_error
+
+        def _report_failure(self, error):
+            """Record ``error`` and warn about it, so ``__call__`` can return the sentinel."""
+            if self._evaluation_error is None:
+                self._evaluation_error = error
+            # Under ``-W error`` warnings.warn raises, and a raise here is precisely the abort
+            # this path exists to prevent. The failure is recorded before the warning is
+            # attempted, so such a filter costs the notice but not the information.
+            with contextlib.suppress(Exception):
+                warnings.warn(
+                    "an OEVibe evaluation failed and was reported to the caller as an "
+                    f"infinite energy, so this result is meaningless: {error!r}. The first "
+                    "failure of this function is available from GetEvaluationError().",
+                    RuntimeWarning,
+                    # Past _report_failure and __call__, which is the caller's own frame on a
+                    # direct call; from OpenEye's director there is no Python frame to name.
+                    stacklevel=3,
+                )
+
         def __call__(self, *args):
-            count = self._function.NumVar()
-            coords = _read_doubles(args[0], count)
-            value = self._function.Evaluate(coords.tolist(), len(args) > 1)
-            if len(args) > 1:
-                _accumulate(args[1], np.asarray(value.gradient, dtype=np.float64))
+            # Nothing may escape: this is called from an OpenEye director, where an exception
+            # becomes a Swig::DirectorMethodException and aborts the process. The body is small
+            # and the gradient write is last, so the whole of it is inside the guard rather
+            # than only the engine call.
+            try:
+                count = self._function.NumVar()
+                coords = _read_doubles(args[0], count)
+                value = self._function.Evaluate(coords.tolist(), len(args) > 1)
+                if len(args) > 1:
+                    _accumulate(args[1], np.asarray(value.gradient, dtype=np.float64))
+            except Exception as error:  # noqa: BLE001 - reported, not swallowed; see above
+                # A KeyboardInterrupt is deliberately not caught: it is not an engine failure,
+                # and turning one into a warning would finish the optimization the user asked
+                # to stop.
+                self._report_failure(error)
+                return _FAILED_EVALUATION_ENERGY
             return value.energy
 
     return _OEVibeMolFunc(options)

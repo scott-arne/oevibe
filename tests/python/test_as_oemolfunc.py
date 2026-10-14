@@ -1,11 +1,13 @@
 """OEVibe as an OpenEye potential, for OpenEye's own optimizers (spec 8.8)."""
 
 import gc
+import itertools
 import os
 import subprocess
 import sys
 import threading
 import types
+import warnings
 import weakref
 from pathlib import Path
 
@@ -190,9 +192,11 @@ def test_a_python_copy_is_collected_when_its_last_reference_goes(butanol_conform
 def test_create_copy_hands_an_owned_copy_to_an_openeye_holder(butanol_conformers):
     """The disown path, exercised the way OpenEye exercises it.
 
-    ``OEGenericFF`` is a C++ owner: it takes the copy, deletes it in its own destructor, and
-    would double-free one that Python also owned. Keeping this case means the ``__disown__()``
-    in ``CreateCopy`` stays covered now that Python callers are steered to ``Copy`` instead.
+    ``OEGenericFF`` is a C++ owner only when it is asked to be. ``Add`` defaults to
+    ``own=False``, which borrows: a disowned copy added that way is deleted by nobody, so the
+    test would leak and the caller-owns contract it exists to cover would go untested.
+    ``Add(copy, True)`` completes the handover ``CreateCopy`` starts, and the weakrefs are what
+    tell the two apart -- under the borrowing form both objects outlive the holder.
     """
     mol = oechem.OEMol(butanol_conformers)
     function = oevibe.as_oemolfunc(mmff_options())
@@ -203,10 +207,19 @@ def test_create_copy_hands_an_owned_copy_to_an_openeye_holder(butanol_conformers
     copy = function.CreateCopy()
     assert copy is not function
     assert not copy.this.own()
+    adapter = weakref.ref(copy)
+    inner = weakref.ref(copy._function)
+
     holder = oeff.OEGenericFF()
-    assert holder.Add(copy)
+    assert holder.Add(copy, True)
     assert holder.Setup(mol)
     assert holder(xs) == pytest.approx(expected, abs=1e-9)
+
+    del copy
+    del holder
+    gc.collect()
+    assert adapter() is None, "the holder's destructor has to delete the copy it owns"
+    assert inner() is None, "the C++ EngineMolFunc has to go with its adapter"
 
 
 def test_an_evaluation_value_is_read_only(butanol_conformers):
@@ -233,6 +246,161 @@ def test_setup_returns_false_for_a_molecule_it_cannot_prepare():
     assert oechem.OESmilesToMol(flat, "CCO")  # implicit hydrogens, no coordinates
     function = oevibe.as_oemolfunc(mmff_options())
     assert function.Setup(flat) is False
+
+
+# An exception raised inside the adapter cannot reach the caller when OpenEye's optimizer is
+# the one calling: SWIG converts it to a Swig::DirectorMethodException, nothing in OpenEye
+# catches that, and the process aborts. The adapter therefore never raises. These cases pin the
+# four parts of that contract -- record, warn, sentinel energy, retrievable error -- on the
+# direct call path, which is safe to exercise in-process; the optimizer path, which is the one
+# that aborts without the fix, needs a child process and lives at the bottom of this file.
+#
+# The registry keeps every engine for the life of the process, so each adapter needs a name no
+# earlier one used.
+_SCRIPTED_NAMES = itertools.count()
+
+
+class _ScriptedSession(oevibe.PythonEngineSession):
+    """Harmonic springs back to the origin, except where the test scripts a failure.
+
+    ``outcome(call_number)`` returns the exception that evaluation must raise, or ``None`` for
+    one that succeeds, so a test can fail every evaluation, only the first, or one partway into
+    an optimization, and can make successive failures distinguishable.
+    """
+
+    def __init__(self, outcome):
+        super().__init__()
+        self._outcome = outcome
+        self.calls = 0
+
+    def evaluate(self, coords, request):
+        self.calls += 1
+        failure = self._outcome(self.calls)
+        if failure is not None:
+            raise failure
+        energy = 0.5 * float(np.sum(coords * coords))
+        if request.gradient:
+            return oevibe.Evaluation(energy=energy, gradient=np.array(coords))
+        return oevibe.Evaluation(energy=energy)
+
+
+class _ScriptedEngine(oevibe.PythonEngine):
+    def __init__(self, name, outcome):
+        super().__init__()
+        self._name = name
+        self._outcome = outcome
+        self.session = None
+
+    def GetName(self):
+        return self._name
+
+    def GetVersion(self):
+        return "1.0"
+
+    def GetMethods(self):
+        capabilities = oevibe.MethodCapabilities()
+        capabilities.method = oevibe.Method("scripted")
+        return [capabilities]
+
+    def CreateSession(self, system, settings):
+        self.session = _ScriptedSession(self._outcome)
+        return self.session
+
+
+def scripted_adapter(mol, outcome):
+    """:returns: An adapter set up on ``mol``, over an engine whose failures ``outcome`` scripts."""
+    engine = _ScriptedEngine(f"as-oemolfunc-scripted-{next(_SCRIPTED_NAMES)}", outcome)
+    oevibe.register_engine(engine)
+    options = oevibe.CalculationOptions()
+    options.SetEngine(engine.GetName())
+    options.SetMethod(oevibe.Method("scripted"))
+    function = oevibe.as_oemolfunc(options)
+    assert function.Setup(mol)
+    return function
+
+
+def test_a_direct_call_on_a_failing_engine_warns_instead_of_raising(butanol_conformers):
+    """The never-raise contract, on the path where raising would in fact have been safe.
+
+    The direct caller could have caught an exception, but the two paths are one ``__call__``
+    and a contract that held only when the caller was Python would be the more dangerous of the
+    two to document. So both report a failure the same way.
+    """
+    mol = oechem.OEMol(butanol_conformers)
+    function = scripted_adapter(mol, lambda call: RuntimeError("scripted-failure"))
+    with pytest.warns(RuntimeWarning, match="scripted-failure"):
+        energy = function(coordinates(mol))
+    assert energy == float("inf")
+    error = function.GetEvaluationError()
+    assert isinstance(error, Exception)
+    assert "scripted-failure" in str(error)
+
+
+def test_a_failed_evaluation_accumulates_nothing_into_the_gradient(butanol_conformers):
+    """A zero gradient contribution is half of what stops the optimizer; the sentinel energy
+    alone would leave it with a direction to keep walking in."""
+    mol = oechem.OEMol(butanol_conformers)
+    function = scripted_adapter(mol, lambda call: RuntimeError("scripted-failure"))
+    nvar = function.NumVar()
+    prefilled = oechem.OEDoubleArray(nvar)
+    for index in range(nvar):
+        prefilled[index] = 5.0
+    with pytest.warns(RuntimeWarning):
+        energy = function(coordinates(mol), prefilled)
+    assert energy == float("inf")
+    assert [prefilled[i] for i in range(nvar)] == [5.0] * nvar
+
+
+def test_the_first_failure_is_the_one_kept(butanol_conformers):
+    """An optimizer keeps calling for a step or two after the failure, and those later calls
+    fail for the same underlying reason; the first is the one that explains the run."""
+    mol = oechem.OEMol(butanol_conformers)
+    function = scripted_adapter(mol, lambda call: RuntimeError(f"failure-{call}"))
+    xs = coordinates(mol)
+    for _ in range(3):
+        with pytest.warns(RuntimeWarning):
+            function(xs)
+    assert "failure-1" in str(function.GetEvaluationError())
+
+
+def test_a_failed_evaluation_is_not_cached(butanol_conformers):
+    """``EngineMolFunc`` caches the last geometry it evaluated, and a failure must not enter
+    that cache: a later call at the same geometry would then return the sentinel silently,
+    without even a warning to show for it."""
+    mol = oechem.OEMol(butanol_conformers)
+    function = scripted_adapter(
+        mol, lambda call: RuntimeError("scripted-failure") if call == 1 else None
+    )
+    xs = coordinates(mol)
+    with pytest.warns(RuntimeWarning):
+        assert function(xs) == float("inf")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        energy = function(xs)
+    assert not caught
+    assert np.isfinite(energy)
+
+
+def test_a_warning_filter_that_raises_cannot_resurrect_the_abort(butanol_conformers):
+    """Under ``-W error`` ``warnings.warn`` raises, and a raise here is the abort this whole
+    path exists to prevent, so the warning is itself guarded. The record survives it."""
+    mol = oechem.OEMol(butanol_conformers)
+    function = scripted_adapter(mol, lambda call: RuntimeError("scripted-failure"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        energy = function(coordinates(mol))
+    assert energy == float("inf")
+    assert "scripted-failure" in str(function.GetEvaluationError())
+
+
+def test_a_successful_adapter_reports_no_evaluation_error(butanol_conformers):
+    mol = oechem.OEMol(butanol_conformers)
+    function = oevibe.as_oemolfunc(mmff_options())
+    assert function.Setup(mol)
+    assert function.GetEvaluationError() is None
+    function(coordinates(mol))
+    assert function.GetEvaluationError() is None
 
 
 def test_two_threads_interleave_inside_the_engine(butanol_conformers):
@@ -384,14 +552,18 @@ def _child_environment():
     return environment
 
 
-def _run_child(source):
-    """:returns: The stdout of ``source`` run in a fresh interpreter; fails on a crash."""
+def _run_child(source, timeout=300):
+    """:returns: The stdout of ``source`` run in a fresh interpreter; fails on a crash.
+
+    ``timeout`` bounds the run, so a child that never terminates fails the test rather than
+    hanging the suite.
+    """
     child = subprocess.run(
         [sys.executable, "-c", source],
         env=_child_environment(),
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=timeout,
         check=False,
     )
     assert child.returncode == 0, child.stdout + child.stderr
@@ -419,3 +591,122 @@ def test_the_adapter_works_under_either_import_form(import_form, expected_module
     minima = next(line for line in lines.splitlines() if line.startswith("MINIMA "))
     _, mine, theirs = minima.split()
     assert float(mine) == pytest.approx(float(theirs), abs=1e-4)
+
+
+# The optimizer half of the never-raise contract. Before the adapter grew it, this scenario did
+# not fail -- it killed the interpreter with "libc++abi: terminating due to uncaught exception
+# of type Swig::DirectorMethodException", taking the rest of the suite with it. A child process
+# is therefore the only way to assert on it: the parent sees an exit status instead of dying,
+# and ``_run_child``'s timeout is the bound that makes "the optimizer must not hang" an
+# assertion rather than a hope.
+_FAILING_ENGINE_CHILD = """
+import time
+import warnings
+
+from openeye import oechem, oeff, oeomega
+
+import oevibe
+
+
+class FailingSession(oevibe.PythonEngineSession):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def evaluate(self, coords, request):
+        self.calls += 1
+        if self.calls > {fail_after}:
+            raise RuntimeError("sentinel-engine-failure")
+        energy = 0.5 * float((coords * coords).sum())
+        if request.gradient:
+            return oevibe.Evaluation(energy=energy, gradient=coords.copy())
+        return oevibe.Evaluation(energy=energy)
+
+
+class FailingEngine(oevibe.PythonEngine):
+    def __init__(self):
+        super().__init__()
+        self.session = None
+
+    def GetName(self):
+        return "abort-probe-engine"
+
+    def GetVersion(self):
+        return "1.0"
+
+    def GetMethods(self):
+        capabilities = oevibe.MethodCapabilities()
+        capabilities.method = oevibe.Method("abort-probe")
+        return [capabilities]
+
+    def CreateSession(self, system, settings):
+        self.session = FailingSession()
+        return self.session
+
+
+engine = FailingEngine()
+oevibe.register_engine(engine)
+
+mol = oechem.OEMol()
+assert oechem.OESmilesToMol(mol, "CCCCO")
+build = oeomega.OEOmegaOptions()
+build.SetMaxConfs(1)
+assert oeomega.OEOmega(build).Build(mol) == oeomega.OEOmegaReturnCode_Success
+
+options = oevibe.CalculationOptions()
+options.SetEngine("abort-probe-engine")
+options.SetMethod(oevibe.Method("abort-probe"))
+function = oevibe.as_oemolfunc(options)
+assert function.Setup(mol)
+
+nvar = function.NumVar()
+xs = oechem.OEDoubleArray(nvar)
+mol.GetCoords(xs)
+out = oechem.OEDoubleArray(nvar)
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    began = time.monotonic()
+    result = oeff.OEBFGSOpt()(function, xs, out)
+    seconds = time.monotonic() - began
+
+print("CALLS", engine.session.calls)
+print("SECONDS", round(seconds, 3))
+print("RESULT", repr(result))
+print("WARNINGS", len(caught))
+print("FINITE_GEOMETRY", all(abs(out[i]) < 1e30 for i in range(nvar)))
+print("ERROR", repr(str(function.GetEvaluationError())))
+print("WARNING_TEXT", repr(str(caught[0].message)) if caught else "none")
+print("ALIVE")
+"""
+
+
+@pytest.mark.parametrize("fail_after", [0, 5])
+def test_a_failing_engine_under_oebfgsopt_does_not_kill_the_process(fail_after):
+    """The abort this contract exists to prevent, at two points in a minimization.
+
+    ``fail_after=0`` fails the very first evaluation, so the optimizer never gets a usable
+    gradient; ``fail_after=5`` fails one partway in, when it has a BFGS history and a search
+    direction it would otherwise keep following. Both must stop promptly -- the ``_run_child``
+    timeout is what makes that an assertion -- warn, and leave the failure retrievable.
+    """
+    lines = _run_child(_FAILING_ENGINE_CHILD.format(fail_after=fail_after), timeout=180)
+    reported = dict(
+        line.split(" ", 1) for line in lines.splitlines() if line.count(" ") >= 1
+    )
+    assert "ALIVE" in lines.splitlines(), lines
+
+    assert reported["RESULT"] == "inf", (
+        "a failed evaluation reports an infinite energy; nan and -inf are accepted by the "
+        f"line search instead of rejected: {reported['RESULT']}"
+    )
+    assert int(reported["WARNINGS"]) >= 1, "a failure is never silent"
+    assert "sentinel-engine-failure" in reported["ERROR"]
+    assert "sentinel-engine-failure" in reported["WARNING_TEXT"]
+    assert reported["FINITE_GEOMETRY"] == "True"
+
+    # A run that thrashed on the sentinel instead of stopping would be far past this. Measured:
+    # 1 evaluation in 0.02 s for fail_after=0, and 8 in 0.002 s for fail_after=5, the three
+    # beyond the fifth being the line search rejecting the infinite step and giving up.
+    assert int(reported["CALLS"]) <= fail_after + 5, reported["CALLS"]
+    assert float(reported["SECONDS"]) < 30.0, reported["SECONDS"]
