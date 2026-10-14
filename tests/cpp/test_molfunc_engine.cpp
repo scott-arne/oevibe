@@ -4,6 +4,8 @@
 #include <oemmff.h>
 
 #include <cmath>
+#include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 #include "oevibe/Error.h"
@@ -72,6 +74,63 @@ public:
 private:
     Probe* probe_;
     const OEChem::OEMolBase* molecule_ = nullptr;
+};
+
+/// A gradient-only potential with a real energy surface: ``E = 1/2 sum_i k_i x_i^2`` in
+/// kcal/mol over the OpenEye coordinates in Angstrom. It supplies the ``OEMolFunc1`` half of
+/// the spec 12.1 round trip, which ``StubPotential``'s zero energy cannot. OpenEye's own
+/// gradient-only potential, ``OEHarmonicPotential``, is no substitute: it evaluates flat after
+/// its ``CreateCopy()``, which is the copy every session gets.
+class QuadraticPotential : public OEMolPotential::OEMolFunc1 {
+public:
+    /// :returns: The force constant for variable ``k``, in kcal/mol/Angstrom^2. It differs per
+    ///     variable so that a transposed or shifted index mapping cannot cancel out.
+    static double StiffnessAt(std::size_t k) { return 1.0 + static_cast<double>(k); }
+
+    static double EnergyAt(const std::vector<double>& x) {
+        double energy = 0.0;
+        for (std::size_t k = 0; k < x.size(); ++k) {
+            energy += 0.5 * StiffnessAt(k) * x[k] * x[k];
+        }
+        return energy;
+    }
+
+    bool Setup(const OEChem::OEMolBase& mol) override {
+        num_var_ = 3u * mol.GetMaxAtomIdx();
+        return true;
+    }
+
+    unsigned NumVar() const override { return num_var_; }
+
+    double operator()(const double* x) override {
+        double energy = 0.0;
+        for (std::size_t k = 0; k < num_var_; ++k) {
+            energy += 0.5 * StiffnessAt(k) * x[k] * x[k];
+        }
+        return energy;
+    }
+
+    double operator()(const double* x, double* g) override {
+        double energy = 0.0;
+        for (std::size_t k = 0; k < num_var_; ++k) {
+            energy += 0.5 * StiffnessAt(k) * x[k] * x[k];
+            // OpenEye sums the components of a composite potential into one buffer, so a
+            // potential adds to the gradient it is handed rather than overwriting it.
+            g[k] += StiffnessAt(k) * x[k];
+        }
+        return energy;
+    }
+
+    OESystem::OEIterBase<OEOpt::OEFComponent>* GetFComponents(const double*) override {
+        return nullptr;
+    }
+
+    OEMolPotential::OEMolFunc1* CreateCopy() const override {
+        return new QuadraticPotential(*this);
+    }
+
+private:
+    unsigned num_var_ = 0;
 };
 
 }  // namespace
@@ -156,6 +215,50 @@ TEST(MolFuncEngineTest, AnalyticHessianMatchesFiniteDifferences) {
             EXPECT_NEAR(evaluation.hessian[k * dim + j], numeric, 1e-2 + 1e-3 * std::abs(numeric));
         }
     }
+}
+
+TEST(MolFuncEngineTest, GradientOnlyPrototypeDeclaresNoAnalyticHessian) {
+    const MolFuncEngine engine("molfunc-quadratic-declare", "1.0", Method("my-quadratic"),
+                               QuadraticPotential());
+    const std::vector<MethodCapabilities> methods = engine.GetMethods();
+    ASSERT_EQ(methods.size(), 1u);
+    EXPECT_TRUE(methods[0].analytic_gradient);
+    // An OEMolFunc1 has no second-derivative call, so the capability has to say so; the engine
+    // reads that off the prototype's dynamic type, not off a flag the caller passes.
+    EXPECT_FALSE(methods[0].analytic_hessian);
+}
+
+TEST(MolFuncEngineTest, GradientOnlyPrototypeRoundTripsEnergyAndGradient) {
+    const OEChem::OEMol mol = test::make_conformers("CCO");
+    const MolecularSystem system(mol, 0, 1);
+    MolFuncEngine engine("molfunc-quadratic", "1.0", Method("my-quadratic"), QuadraticPotential());
+    auto session = engine.CreateSession(system, settings_for("my-quadratic"));
+    const std::vector<double> x = system.GetConformerCoordinates(0);
+
+    const double energy = session->Evaluate(x, EvaluationRequest()).energy;
+    EXPECT_NEAR(energy, QuadraticPotential::EnergyAt(x), 1e-9 * std::abs(energy));
+
+    // The gradient the session reports comes from OEMolFunc1::operator()(x, g), which
+    // accumulates into a buffer the session owns; finite differences of the energy are what
+    // pin that it was neither dropped nor double-counted.
+    const std::vector<double> analytic = gradient_at(*session, x);
+    ASSERT_EQ(analytic.size(), x.size());
+    const double step = 1e-5;
+    for (std::size_t k = 0; k < x.size(); ++k) {
+        std::vector<double> plus = x;
+        std::vector<double> minus = x;
+        plus[k] += step;
+        minus[k] -= step;
+        const double numeric = (session->Evaluate(plus, EvaluationRequest()).energy -
+                                session->Evaluate(minus, EvaluationRequest()).energy) /
+                               (2.0 * step);
+        EXPECT_NEAR(analytic[k], numeric, 1e-6 * std::max(1.0, std::abs(numeric))) << k;
+    }
+
+    // The capability and the session agree: there is no Hessian to ask for.
+    EvaluationRequest request;
+    request.hessian = true;
+    EXPECT_THROW(session->Evaluate(x, request), std::runtime_error);
 }
 
 TEST(MolFuncEngineTest, FailedSetupIsUnsupported) {
