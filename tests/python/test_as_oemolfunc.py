@@ -1,10 +1,12 @@
 """OEVibe as an OpenEye potential, for OpenEye's own optimizers (spec 8.8)."""
 
+import gc
 import os
 import subprocess
 import sys
 import threading
 import types
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -130,11 +132,11 @@ def test_an_entry_point_engine_is_reachable_through_the_adapter(
     assert function(coordinates(mol)) == pytest.approx(expected, abs=1e-9)
 
 
-def test_create_copy_gives_an_independent_function(butanol_conformers):
+def test_copy_gives_an_independent_function(butanol_conformers):
     mol = oechem.OEMol(butanol_conformers)
     function = oevibe.as_oemolfunc(mmff_options())
     assert function.Setup(mol)
-    copy = function.CreateCopy()
+    copy = function.Copy()
     assert copy is not function
     assert copy.Setup(mol)
     xs = coordinates(mol)
@@ -153,9 +155,70 @@ def test_a_copy_ignores_later_edits_to_the_callers_options(butanol_conformers):
 
     options.SetMethod(oevibe.Method("gfn2-xtb"))
     options.SetEngine("tblite")
-    copy = function.CreateCopy()
+    copy = function.Copy()
     assert copy.Setup(mol)
     assert copy(xs) == pytest.approx(before, abs=1e-12)
+
+
+def test_a_python_copy_is_collected_when_its_last_reference_goes(butanol_conformers):
+    """Why ``Copy`` exists at all: ``CreateCopy`` cannot be collectable and stay correct.
+
+    ``OEMolFunc1::CreateCopy() const`` is caller-owns, so the adapter has to ``__disown__()``
+    what it returns -- right when OpenEye's C++ is the caller, and a leak when Python is, since
+    then nothing ever takes the ownership Python gave up. Collectability is the thing asserted,
+    with weakrefs and a forced collection, because the defect is an unreachable object rather
+    than a large one.
+    """
+    mol = oechem.OEMol(butanol_conformers)
+    function = oevibe.as_oemolfunc(mmff_options())
+    assert function.Setup(mol)
+
+    copy = function.Copy()
+    assert copy.Setup(mol)
+    assert copy.this.own(), "a Copy stays owned by Python"
+    adapter = weakref.ref(copy)
+    inner = weakref.ref(copy._function)
+    del copy
+    gc.collect()
+    assert adapter() is None
+    assert inner() is None, "the C++ EngineMolFunc has to go with its adapter"
+
+    disowned = function.CreateCopy()
+    assert not disowned.this.own(), "CreateCopy still hands ownership to its C++ caller"
+
+
+def test_create_copy_hands_an_owned_copy_to_an_openeye_holder(butanol_conformers):
+    """The disown path, exercised the way OpenEye exercises it.
+
+    ``OEGenericFF`` is a C++ owner: it takes the copy, deletes it in its own destructor, and
+    would double-free one that Python also owned. Keeping this case means the ``__disown__()``
+    in ``CreateCopy`` stays covered now that Python callers are steered to ``Copy`` instead.
+    """
+    mol = oechem.OEMol(butanol_conformers)
+    function = oevibe.as_oemolfunc(mmff_options())
+    assert function.Setup(mol)
+    xs = coordinates(mol)
+    expected = function(xs)
+
+    copy = function.CreateCopy()
+    assert copy is not function
+    assert not copy.this.own()
+    holder = oeff.OEGenericFF()
+    assert holder.Add(copy)
+    assert holder.Setup(mol)
+    assert holder(xs) == pytest.approx(expected, abs=1e-9)
+
+
+def test_an_evaluation_value_is_read_only(butanol_conformers):
+    """House rule: a value handed to Python is read-only, private name or not."""
+    mol = oechem.OEMol(butanol_conformers)
+    function = oevibe.as_oemolfunc(mmff_options())
+    assert function.Setup(mol)
+    value = function._function.Evaluate(list(coordinates(mol)), True)
+    with pytest.raises(AttributeError):
+        value.energy = 0.0
+    with pytest.raises(AttributeError):
+        value.gradient = ()
 
 
 def test_get_fcomponents_is_none(butanol_conformers):

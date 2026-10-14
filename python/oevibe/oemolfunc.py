@@ -1,5 +1,17 @@
 """Bridges between OEVibe and OpenEye's potential and optimizer interfaces (spec 8.8).
 
+The traffic runs both ways. :func:`MolFuncEngine` wraps an OpenEye potential as an OEVibe engine,
+so OEVibe's optimizer, scans and thermochemistry can drive it; :func:`as_oemolfunc` wraps OEVibe
+options as an ``openeye.oeff.OEMolFunc1``, so OpenEye's optimizers can drive OEVibe. The two do
+not compose: an ``as_oemolfunc`` adapter is a Python-defined subclass, which the rule below makes
+:func:`MolFuncEngine` refuse. Neither half imports ``openeye`` at module scope, so importing
+``oevibe`` does not pull the toolkit in.
+
+The predicates in between belong to the inbound half, the only one that has to judge what it was
+handed. The outbound half builds the class it hands out, so it judges nothing; what it has
+instead is an ownership split to know before reading it, ``CreateCopy`` being OpenEye's
+caller-owns hook and ``Copy`` the Python-owned sibling.
+
 Spec 8.8 accepts OpenEye-defined potentials only, so the predicates below have to tell an
 OpenEye-defined class from anything else. What they achieve, and what they do not:
 
@@ -307,7 +319,8 @@ def as_oemolfunc(options):
     kcal/mol/Angstrom in the OpenEye layout of the molecule it was set up on.
 
     :param options: An ``oevibe.CalculationOptions``.
-    :returns: An ``openeye.oeff.OEMolFunc1`` subclass instance.
+    :returns: An ``openeye.oeff.OEMolFunc1`` subclass instance. It is not thread-safe; its
+        ``Copy()`` makes the independent, Python-owned copy a worker thread needs.
     :raises OptionsError: For invalid options or a method the engine does not provide.
     :raises EngineUnavailableError: When the engine or the method is unavailable.
     """
@@ -320,11 +333,16 @@ def as_oemolfunc(options):
     ensure_engines_loaded()
 
     class _OEVibeMolFunc(oeff.OEMolFunc1):
-        """One OEVibe calculation presented to OpenEye. Not thread-safe; use one per thread.
+        """One OEVibe calculation presented to OpenEye.
 
-        It holds no reference to the caller's ``CalculationOptions``: the C++ ``EngineMolFunc``
-        copied them at construction, and ``CreateCopy`` goes through C++ so a copy inherits that
-        snapshot rather than re-reading a proxy the caller may have edited since.
+        Not thread-safe -- it caches the last geometry it was evaluated at -- so give each
+        thread its own, made with :meth:`Copy`. :meth:`CreateCopy` is OpenEye's hook and gives
+        its result away to C++; see there.
+
+        An instance holds no reference to the caller's ``CalculationOptions``: the C++
+        ``EngineMolFunc`` copied them at construction, and both copy methods go through C++, so
+        a copy inherits that snapshot rather than re-reading a proxy the caller may have edited
+        since.
         """
 
         def __init__(self, calculation_options=None, function=None):
@@ -336,10 +354,31 @@ def as_oemolfunc(options):
             )
 
         def CreateCopy(self):
+            """OpenEye's copy hook, for OpenEye's C++ to call.
+
+            ``OEMolFunc1::CreateCopy() const`` is caller-owns, so the copy is disowned here and
+            whoever asked for it deletes it. A Python caller cannot honour that contract -- it
+            would be holding an object it no longer owns and nothing else ever will -- so Python
+            should call :meth:`Copy` instead.
+
+            :returns: A disowned copy with the same options, not yet set up on a molecule.
+            """
             copy = _OEVibeMolFunc(function=self._function.CreateCopy())
             # OpenEye takes ownership of a copy, so Python must stop owning it.
             copy.__disown__()
             return copy
+
+        def Copy(self):
+            """The Python-owned sibling of :meth:`CreateCopy`.
+
+            Same independent C++ function underneath, same options snapshot, but ownership stays
+            with Python, so the copy is freed like any other object once the last reference to
+            it goes. This is the one to use for the per-thread copy the class docstring asks
+            for; ``CreateCopy`` would leak it.
+
+            :returns: An independent copy with the same options, not yet set up on a molecule.
+            """
+            return _OEVibeMolFunc(function=self._function.CreateCopy())
 
         def Setup(self, mol):
             return self._function.Setup(mol)

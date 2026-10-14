@@ -1068,6 +1068,11 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 %feature("flatnested") OEVIBE::EngineMolFunc::FunctionValue;
 %rename("_EngineMolFuncValue") OEVIBE::EngineMolFunc::FunctionValue;
 %naturalvar OEVIBE::EngineMolFunc::FunctionValue::gradient;
+// Read-only like every other value this module hands to Python: C++ fills these and Python only
+// reads them, so a setter would be a write with nowhere to go. Named rather than a %immutable
+// block, because the rest of OEAdapters.h is classes, not values.
+%immutable OEVIBE::EngineMolFunc::FunctionValue::energy;
+%immutable OEVIBE::EngineMolFunc::FunctionValue::gradient;
 // The Python factory oevibe.MolFuncEngine upcasts the potential before calling this; see the
 // OEMolFunc1 typemap above for why a direct call would be wrong.
 %rename("_MolFuncEngine") OEVIBE::MolFuncEngine;
