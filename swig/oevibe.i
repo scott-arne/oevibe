@@ -1002,6 +1002,11 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 // EngineMolFunc is an OEMolPotential::OEMolFunc2 and could not be handed to OpenEye's Python
 // optimizers across the runtime boundary; oevibe.as_oemolfunc is the Python path (spec 8.8).
 %ignore OEVIBE::EngineMolFunc;
+// %ignore does not stop SWIG parsing the class, so it still reports the incomplete OpenEye base
+// (402) and the nested FunctionValue it would have dropped (325). Both are consequences of the
+// %ignore above, not of anything this module exports.
+%warnfilter(402) OEVIBE::EngineMolFunc;
+%warnfilter(325) OEVIBE::EngineMolFunc::FunctionValue;
 // The Python factory oevibe.MolFuncEngine upcasts the potential before calling this; see the
 // OEMolFunc1 typemap above for why a direct call would be wrong.
 %rename("_MolFuncEngine") OEVIBE::MolFuncEngine;
