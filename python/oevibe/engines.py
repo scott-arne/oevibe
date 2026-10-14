@@ -172,9 +172,10 @@ def _register_retained(engine, replace: bool) -> None:
     """Register ``engine`` without triggering entry-point discovery.
 
     The public :func:`register_engine` starts discovery before it registers, and discovery
-    registers the engines it finds, so that path needs a registration call that does not start
-    discovery again. The binding's ``Register`` wrapper keeps ``engine`` alive for the life of the
-    process before the native call commits, so nothing further is retained here.
+    registers the engines it finds through this function instead, so that loading an engine never
+    goes back through the query path. The binding's ``Register`` wrapper keeps ``engine`` alive
+    for the life of the process before the native call commits, so nothing further is retained
+    here.
 
     :param engine: An ``oevibe.Engine`` instance.
     :param replace: Replace an engine already registered under the same name.
@@ -191,7 +192,8 @@ def register_engine(engine, *, replace: bool = False) -> None:
 
     Registering counts as the first registry query, so the ``oevibe.engines`` entry points load
     before ``engine`` is registered; an entry-point engine of the same name is therefore already
-    present and is displaced only with ``replace=True``.
+    present and is displaced only with ``replace=True``. The one exception is a registration from
+    another thread while the first query is still loading; see :func:`ensure_engines_loaded`.
 
     :param engine: An :class:`PythonEngine` (strictly, any ``oevibe.Engine``) instance.
     :param replace: Replace an engine already registered under the same name.
@@ -207,12 +209,12 @@ def register_engine(engine, *, replace: bool = False) -> None:
 
 
 _ENTRY_POINT_GROUP = "oevibe.engines"
-# Re-entrant on purpose. The loader itself never re-enters (it registers through the private
-# _register_retained), but plugin code runs while this is held: an entry point whose factory
-# calls register_engine() or available_engines() would deadlock on a plain Lock. With an RLock
-# the loading thread passes straight through and sees _LOADED already true, while other threads
-# still wait for the load to finish.
-_LOAD_LOCK = threading.RLock()
+# Guards only the check-and-claim of _LOADED and is never held while plugin code runs. A plugin
+# may call the public registry API from its loading thread or from a worker thread it starts and
+# waits for; holding any lock across the plugin's code would deadlock the second case, which no
+# kind of re-entrant lock can fix. Claiming the load first means every later caller, on any
+# thread, sees _LOADED true and returns at once.
+_LOAD_LOCK = threading.Lock()
 _LOADED = False
 # Entry points that produced no usable engine, reported by available_engines() alongside the
 # registry's own engines (spec 8.7).
@@ -271,9 +273,9 @@ def _describe(engine) -> EngineInfo:
 def _load_entry_point(point) -> None:
     """Load one entry point and register its engine, recording any failure in ``_FAILED``.
 
-    Runs with ``_LOAD_LOCK`` held, so it registers through the private
-    :func:`_register_retained` rather than :func:`register_engine`, which would start discovery
-    again from inside discovery.
+    Runs after the load is claimed and outside ``_LOAD_LOCK``, and registers through the private
+    :func:`_register_retained` rather than :func:`register_engine`, so loading an engine never
+    goes back through the query path.
     """
     # Until the engine can name itself, the entry point's name is all there is to report under.
     name = point.name
@@ -317,15 +319,37 @@ def _load_entry_point(point) -> None:
 
 
 def ensure_engines_loaded() -> None:
-    """Load the ``oevibe.engines`` entry points once, on the first registry query (spec 8.7)."""
+    """Load the ``oevibe.engines`` entry points once, on the first registry query (spec 8.7).
+
+    The first caller claims the load and runs it on its own thread. A query that arrives from
+    another thread while that load is still running returns at once instead of waiting, so it
+    may see engines that are still being registered, or fail to find an entry-point engine that
+    has not been reached yet. That race is deliberate: waiting would deadlock a plugin whose
+    factory hands registry calls to a worker thread and joins it, and a plugin cannot be told
+    apart from any other thread.
+    """
     global _LOADED
     with _LOAD_LOCK:
         if _LOADED:
             return
-        # Set before loading: a plugin that raises must not make every later query retry it.
+        # Claimed before loading and never reset: a plugin or an enumeration that fails must not
+        # make every later query retry it.
         _LOADED = True
-        for point in metadata.entry_points(group=_ENTRY_POINT_GROUP):
-            _load_entry_point(point)
+    try:
+        points = list(metadata.entry_points(group=_ENTRY_POINT_GROUP))
+    except Exception as error:  # noqa: BLE001 - a malformed distribution must not break queries
+        _FAILED.append(
+            EngineInfo(
+                f"<{_ENTRY_POINT_GROUP}>",
+                "",
+                False,
+                f"could not enumerate the {_ENTRY_POINT_GROUP!r} entry points: {error}",
+                (),
+            )
+        )
+        return
+    for point in points:
+        _load_entry_point(point)
 
 
 def available_engines() -> list[EngineInfo]:

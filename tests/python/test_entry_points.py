@@ -77,10 +77,10 @@ def test_an_entry_point_engine_is_registered_and_listed(fresh_discovery, monkeyp
 
 
 def test_discovery_does_not_deadlock_on_a_successful_load(fresh_discovery, monkeypatch):
-    """Discovery registers the engines it finds from inside the load lock.
+    """Discovery registers the engines it finds while the first registry query is running.
 
-    The bounded join is the assertion: any registration path that blocked on the load lock from
-    the loading thread would make this test time out instead of finishing.
+    The bounded join is the assertion: a registration path that waited on the load it is part of
+    would make this test time out instead of finishing.
     """
     patch_entry_points(
         monkeypatch,
@@ -109,8 +109,8 @@ def test_a_plugin_that_uses_the_public_api_does_not_deadlock(
 ):
     """A plugin may legitimately register a second engine, or ask what else is available.
 
-    Both re-enter ``ensure_engines_loaded`` from the loading thread, which is why the load lock
-    is re-entrant. The bounded join is the assertion.
+    Both re-enter ``ensure_engines_loaded`` from the loading thread, which must find the load
+    already claimed and return. The bounded join is the assertion.
     """
 
     def make():
@@ -133,6 +133,51 @@ def test_a_plugin_that_uses_the_public_api_does_not_deadlock(
     assert finished.is_set(), (
         "a plugin using the public registry API deadlocked discovery"
     )
+
+
+def test_a_plugin_worker_thread_using_the_public_api_does_not_deadlock(
+    fresh_discovery, monkeypatch
+):
+    """A factory may hand registry calls to a worker thread and wait for it.
+
+    Re-entry from the loading thread is not the only way in: the worker is a different thread,
+    so a lock held across plugin code would block it while the factory blocks on the worker.
+    The factory's own join is bounded too, and the outcome is recorded rather than asserted
+    inside the factory, because the loader would swallow an assertion as a plugin failure.
+    """
+    worker_finished = []
+
+    def make():
+        done = threading.Event()
+
+        def worker():
+            oevibe.register_engine(CountingEngine("ep-worker-helper"), replace=True)
+            oevibe.available_engines()
+            done.set()
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+        worker_finished.append(done.is_set())
+        return CountingEngine("ep-worker-main")
+
+    patch_entry_points(
+        monkeypatch, [fake_entry_point("worker", "pkg:make", lambda: make)]
+    )
+    finished = threading.Event()
+
+    def discover():
+        oevibe.available_engines()
+        finished.set()
+
+    thread = threading.Thread(target=discover, daemon=True)
+    thread.start()
+    thread.join(timeout=20)
+    assert finished.is_set(), "entry-point discovery did not finish; it is deadlocked"
+    assert worker_finished == [True], (
+        "a worker thread using the public registry API was blocked by discovery"
+    )
+    assert by_name(oevibe.available_engines(), "ep-worker-main").available
 
 
 def test_a_factory_returning_something_else_is_listed_unavailable(
@@ -170,6 +215,29 @@ def test_a_failing_entry_point_is_listed_with_its_exception_text(
     info = by_name(oevibe.available_engines(), "broken")
     assert not info.available
     assert "no module named widget" in info.reason
+
+
+def test_a_failing_enumeration_is_listed_and_not_retried(fresh_discovery, monkeypatch):
+    """A malformed ``entry_points.txt`` in any installed distribution breaks enumeration.
+
+    The failure is recorded like any other discovery failure rather than raised or lost, and
+    it is not retried on every later query.
+    """
+    calls = []
+
+    def entry_points(*, group=None):
+        calls.append(group)
+        raise ValueError("malformed entry_points.txt")
+
+    monkeypatch.setattr(engines_module.metadata, "entry_points", entry_points)
+    first = oevibe.available_engines()
+    second = oevibe.available_engines()
+    for infos in (first, second):
+        failed = [info for info in infos if "malformed entry_points.txt" in info.reason]
+        assert len(failed) == 1
+        assert not failed[0].available
+        assert by_name(infos, "oeff").available
+    assert len(calls) == 1
 
 
 def test_an_engine_whose_get_methods_raises_is_listed_unavailable(
