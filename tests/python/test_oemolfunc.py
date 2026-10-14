@@ -1,12 +1,16 @@
 """OpenEye potentials as OEVibe engines (spec 8.8)."""
 
 import gc
+import weakref
 
 import numpy as np
 import pytest
 from openeye import oechem, oeff
 
 import oevibe
+from oevibe import oevibe as _proxy
+from oevibe.oemolfunc import _as_molfunc1
+from oevibe.oevibe import _MolFuncEngine
 
 METHOD = "mmff94s-molfunc"
 GRADIENT_ONLY_METHOD = "harmonic-molfunc"
@@ -276,3 +280,109 @@ def test_frequencies_use_the_analytic_hessian(butanol_conformers, mmff_engine):
     ).GetMessage()
     frequencies = np.array(list(results.Get(0).GetThermochemistry().frequencies))
     assert len(frequencies) == 3 * butanol_conformers.NumAtoms() - 6
+
+
+# ---------------------------------------------------------------------------
+# The Register keepalive (spec 8.7) and the one engine that is exempt from it
+# ---------------------------------------------------------------------------
+# Registering from Python retains the engine for the life of the process, because a Python
+# engine's C++ director only borrows its Python object. A _MolFuncEngine borrows nothing: it is
+# a native C++ engine holding a C++ copy of the potential, so retaining it would pin the engine
+# and its copy of the OpenEye potential forever, once per registration.
+
+
+def test_replacing_a_molfunc_engine_does_not_retain_it():
+    """Registering over a name five times used to grow the keepalive list by five."""
+    before = len(_proxy._REGISTERED_ENGINES)
+    references = []
+    for _ in range(5):
+        engine = oevibe.MolFuncEngine(
+            "oeff-molfunc-churn",
+            "1.0",
+            oevibe.Method("mmff94s-churn"),
+            oeff.OEMMFF(True),
+        )
+        references.append(weakref.ref(engine))
+        oevibe.register_engine(engine, replace=True)
+        del engine
+    assert len(_proxy._REGISTERED_ENGINES) == before
+    gc.collect()
+    assert [reference() for reference in references] == [None] * 5
+
+
+def test_a_calculation_keeps_the_engine_it_resolved_through_a_replacement(
+    butanol_conformers,
+):
+    """Dropping the keepalive must not drop the engine: the registry and every Calculation that
+    resolved it hold C++ ``shared_ptr``s, which is the only thing standing between this change
+    and a use-after-free."""
+    name = "oeff-molfunc-replaced"
+    method = "mmff94s-replaced"
+    engine = oevibe.MolFuncEngine(name, "1.0", oevibe.Method(method), oeff.OEMMFF(True))
+    oevibe.register_engine(engine, replace=True)
+    options = oevibe.CalculationOptions()
+    options.SetMethod(oevibe.Method(method))
+    calculation = oevibe.Calculation(options)
+    reference = weakref.ref(engine)
+    del engine
+    gc.collect()
+    assert reference() is None, "nothing should still pin the Python proxy"
+
+    # The harmonic potential evaluates flat, so an energy of zero here would mean the
+    # calculation had followed the registry to the replacement instead of holding its own.
+    oevibe.register_engine(
+        oevibe.MolFuncEngine(
+            name, "1.0", oevibe.Method(method), oeff.OEHarmonicPotential(10.0, 0.0)
+        ),
+        replace=True,
+    )
+    gc.collect()
+    result = calculation.Energy(oechem.OEMol(butanol_conformers)).Get(0)
+    assert result.GetStatus() == oevibe.ConformerStatus.OK, result.GetMessage()
+    expected = (
+        oevibe.Calculation(oeff_options())
+        .Energy(oechem.OEMol(butanol_conformers))
+        .Get(0)
+    )
+    assert result.GetEnergy() == pytest.approx(expected.GetEnergy(), abs=1e-9)
+
+
+def test_a_python_engine_is_still_retained():
+    """The exemption is for the native engine only; a director still borrows its Python self."""
+
+    class Noop(oevibe.PythonEngine):
+        def GetName(self):
+            return "molfunc-keepalive-control"
+
+        def GetVersion(self):
+            return "1.0"
+
+        def GetMethods(self):
+            capabilities = oevibe.MethodCapabilities()
+            capabilities.method = oevibe.Method("molfunc-keepalive-control")
+            return [capabilities]
+
+        def CreateSession(self, system, settings):
+            raise NotImplementedError
+
+    before = len(_proxy._REGISTERED_ENGINES)
+    oevibe.register_engine(Noop(), replace=True)
+    assert len(_proxy._REGISTERED_ENGINES) == before + 1
+
+
+def test_a_python_subclass_of_the_native_engine_is_still_retained():
+    """``isinstance`` would be the wrong test: a subclass carries Python state that the C++ side
+    has no reference to, so retention stays the default for everything but the exact type."""
+
+    class Subclassed(_MolFuncEngine):
+        def __init__(self, name, method, potential):
+            # _holder must stay referenced across the constructor; see oemolfunc.MolFuncEngine.
+            upcast, _holder = _as_molfunc1(potential)
+            super().__init__(name, "1.0", oevibe.Method(method), upcast)
+
+    before = len(_proxy._REGISTERED_ENGINES)
+    oevibe.register_engine(
+        Subclassed("molfunc-subclass", "mmff94s-subclass", oeff.OEMMFF(True)),
+        replace=True,
+    )
+    assert len(_proxy._REGISTERED_ENGINES) == before + 1

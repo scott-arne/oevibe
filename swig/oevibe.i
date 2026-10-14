@@ -986,8 +986,14 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 // cost is that an engine the registry goes on to reject stays retained. That is bounded memory
 // under user error. Nothing undoes the append on a failed Register, because a compensating pop
 // would open the same window it closed.
+//
+// The one exemption is a _MolFuncEngine, which is native C++ holding a C++ copy of an OpenEye
+// potential and borrows no Python state at all; retaining it would pin that copy for the life
+// of the process on every re-registration of the same name. Retention stays the default for
+// everything else, including anything the predicate cannot classify.
 %pythonprepend OEVIBE::EngineRegistry::Register %{
-    _REGISTERED_ENGINES.append(engine)
+    if not _is_exact_molfunc_engine(engine):
+        _REGISTERED_ENGINES.append(engine)
 %}
 %include "oevibe/EngineRegistry.h"
 
@@ -1133,11 +1139,21 @@ import enum as _enum
 
 __version__ = "0.1.0"
 
-# Every engine ever registered from Python, kept alive for the life of the process: a
-# registered engine's C++ director borrows its Python object, so dropping the last reference
-# would leave the registry calling into freed memory (see the Register keepalive in
-# swig/oevibe.i).
+# Every engine ever registered from Python except the one exempt native type, kept alive for
+# the life of the process: a registered engine's C++ director borrows its Python object, so
+# dropping the last reference would leave the registry calling into freed memory (see the
+# Register keepalive in swig/oevibe.i).
 _REGISTERED_ENGINES = []
+
+
+def _is_exact_molfunc_engine(engine):
+    """:returns: Whether ``engine`` is exactly the native ``_MolFuncEngine`` proxy.
+
+    Exact type, like the ``_oevibe_is_exact_molfunc1`` guard in swig/oevibe.i, and for the same
+    reason: ``isinstance`` would also answer yes for a Python subclass, which carries Python
+    state of its own and must keep being retained.
+    """
+    return type(engine) is _MolFuncEngine
 
 OEVibeError = _oevibe.OEVibeError
 OptionsError = _oevibe.OptionsError
