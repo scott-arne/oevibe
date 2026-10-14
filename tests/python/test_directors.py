@@ -180,6 +180,69 @@ def test_capabilities_round_trip_a_list_of_solvent_models():
     ]
 
 
+def test_a_registered_engine_survives_its_last_python_reference(butanol_conformers):
+    """The registry holds a ``shared_ptr``, which keeps the C++ director alive, but a director
+    only borrows its Python object. Without a keepalive on ``Register`` the first callback after
+    the proxy is collected -- the ``GetName`` inside the next ``Calculation`` -- runs against
+    freed memory."""
+    oevibe.EngineRegistry.Instance().Register(SpringEngine("director-dropped"), True)
+    gc.collect()
+    results = oevibe.Calculation(spring_options("director-dropped")).Energy(
+        butanol_conformers
+    )
+    for result in results:
+        assert result.GetStatus() == oevibe.ConformerStatus.OK, result.GetMessage()
+
+
+def test_a_system_kept_past_its_callback_still_reads(butanol_conformers):
+    """A director's reference arguments point into per-call C++ state, so an engine that keeps
+    the system it was handed read freed memory once the verb returned: ``NumAtoms`` came back as
+    a number in the billions rather than raising."""
+    kept = {}
+
+    class Keeping(SpringEngine):
+        def ValidateSystem(self, system, settings):
+            kept["validated"] = system
+
+        def CreateSession(self, system, settings):
+            kept["created"] = system
+            kept["settings"] = settings
+            return SpringSession()
+
+    register(Keeping("director-kept-system"))
+    oevibe.Calculation(spring_options("director-kept-system")).Energy(
+        butanol_conformers
+    )
+    gc.collect()
+    # Fresh snapshots land in the memory the per-call state just freed.
+    churn = [oevibe.MolecularSystem(butanol_conformers, 0, 1) for _ in range(8)]
+
+    assert kept["created"].NumAtoms() == butanol_conformers.NumAtoms()
+    assert kept["validated"].NumAtoms() == butanol_conformers.NumAtoms()
+    assert kept["settings"].method.GetName() == "spring"
+    assert len(churn) == 8
+
+
+def test_class_valued_members_outlive_their_parent():
+    """``%naturalvar`` gives a container member value semantics but leaves a member of a wrapped
+    class type a bare pointer into its parent, so the temporary ``find_method`` returns could be
+    freed before the name was ever read."""
+    engine = SpringEngine("director-member-copy")
+    method = oevibe.find_method(engine, oevibe.Method("spring")).method
+    gc.collect()
+    assert method.GetName() == "spring"
+
+    settings = oevibe.EngineSettings()
+    settings.method = oevibe.Method("gfn2-xtb")
+    settings.solvent = oevibe.Solvent("water")
+    kept_method = settings.method
+    kept_solvent = settings.solvent
+    del settings
+    gc.collect()
+    assert kept_method.GetName() == "gfn2-xtb"
+    assert kept_solvent.GetName() == "water"
+
+
 def test_find_method_reads_a_python_engine_s_capabilities():
     """``find_method`` returns a ``std::optional``, which SWIG has no support for: untyped it
     reaches Python as an opaque pointer that cannot be read and leaks on every call."""

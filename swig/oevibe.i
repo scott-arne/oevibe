@@ -394,6 +394,30 @@ OE_CROSS_RUNTIME_REF_TYPEMAPS(OEDocking::OEReceptor, _oevibe_is_oereceptor, "Exp
 %ignore Vector::get_allocator;
 %enddef
 
+// Indexing a vector of a class type returns a pointer into the vector's storage. The element's
+// reference to the vector keeps that storage allocated but not in place, so every method that
+// can reallocate, shrink, swap, or replace it leaves elements taken earlier dangling. Such a
+// vector is read-only here: C++ fills it, and the container typemaps convert a plain Python
+// list the other way without any of these.
+%define OEVIBE_READONLY_VECTOR(Vector...)
+OEVIBE_SAFE_VECTOR(Vector)
+%ignore Vector::append;
+%ignore Vector::push_back;
+%ignore Vector::insert;
+%ignore Vector::assign;
+%ignore Vector::resize;
+%ignore Vector::reserve;
+%ignore Vector::pop;
+%ignore Vector::erase;
+%ignore Vector::clear;
+%ignore Vector::swap;
+%ignore Vector::__setitem__;
+%ignore Vector::__delitem__;
+// SWIG releases before 4.5 also generate the Python 2 slice methods.
+%ignore Vector::__setslice__;
+%ignore Vector::__delslice__;
+%enddef
+
 OEVIBE_SAFE_VECTOR(std::vector<double>)
 OEVIBE_SAFE_VECTOR(std::vector<unsigned int>)
 OEVIBE_SAFE_VECTOR(std::vector<std::string>)
@@ -670,26 +694,9 @@ than one thread at a time."
 %include "oevibe/Preset.h"
 %include "oevibe/Solvent.h"
 %include "oevibe/Property.h"
-// Indexing returns a pointer into the vector's storage. The element's reference to the vector
-// keeps that storage allocated but not in place, so every method that can reallocate, shrink,
-// swap, or replace it would leave elements taken earlier dangling. Results hand out bond orders
-// as copies and nothing in Python passes a vector to C++, so the vector is read-only here.
-%ignore std::vector<OEVIBE::BondOrder>::append;
-%ignore std::vector<OEVIBE::BondOrder>::push_back;
-%ignore std::vector<OEVIBE::BondOrder>::insert;
-%ignore std::vector<OEVIBE::BondOrder>::assign;
-%ignore std::vector<OEVIBE::BondOrder>::resize;
-%ignore std::vector<OEVIBE::BondOrder>::reserve;
-%ignore std::vector<OEVIBE::BondOrder>::pop;
-OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::BondOrder>)
-%ignore std::vector<OEVIBE::BondOrder>::erase;
-%ignore std::vector<OEVIBE::BondOrder>::clear;
-%ignore std::vector<OEVIBE::BondOrder>::swap;
-%ignore std::vector<OEVIBE::BondOrder>::__setitem__;
-%ignore std::vector<OEVIBE::BondOrder>::__delitem__;
-// SWIG releases before 4.5 also generate the Python 2 slice methods.
-%ignore std::vector<OEVIBE::BondOrder>::__setslice__;
-%ignore std::vector<OEVIBE::BondOrder>::__delslice__;
+// Results hand out bond orders as copies and nothing in Python passes a vector to C++, so this
+// one takes the read-only treatment the macro describes.
+OEVIBE_READONLY_VECTOR(std::vector<OEVIBE::BondOrder>)
 %template(BondOrderVector) std::vector<OEVIBE::BondOrder>;
 
 // ---- Engines (spec 8.1, 8.2, 8.7) --------------------------------------------------------
@@ -757,7 +764,7 @@ namespace OEVIBE {
 struct KeywordSpec;
 struct MethodCapabilities;
 }
-OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::Method>)
+OEVIBE_READONLY_VECTOR(std::vector<OEVIBE::Method>)
 %template(MethodVector) std::vector<OEVIBE::Method>;
 OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::SolventModel>)
 %template(SolventModelVector) std::vector<OEVIBE::SolventModel>;
@@ -793,10 +800,44 @@ struct traits_from<OEVIBE::SolventModel> {
 }
 }
 %fragment("OEVibeSolventModelTraits");
-OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::MethodCapabilities>)
+OEVIBE_READONLY_VECTOR(std::vector<OEVIBE::MethodCapabilities>)
 %template(MethodCapabilitiesVector) std::vector<OEVIBE::MethodCapabilities>;
-OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::KeywordSpec>)
+OEVIBE_READONLY_VECTOR(std::vector<OEVIBE::KeywordSpec>)
 %template(KeywordSpecVector) std::vector<OEVIBE::KeywordSpec>;
+
+// A director callback's reference arguments point into storage C++ frees when the call ends:
+// the MolecularSystem dies with the Calculation's per-call state, the EngineSettings with the
+// Calculation, the EvaluationRequest with the single evaluation. SWIG's default hands Python a
+// non-owning proxy over each, so an engine that keeps one -- the natural thing to do with the
+// system it was asked to build a session for -- reads freed memory afterwards and gets silent
+// garbage rather than an error. Each crosses as a copy Python owns instead. The snapshot copy
+// is the only costly one, and it happens once per session, which is once per conformer.
+%define OEVIBE_DIRECTORIN_COPY(Type...)
+%typemap(directorin) const Type& {
+    $input = SWIG_NewPointerObj(new Type($1), $descriptor(Type*),
+                                SWIG_POINTER_OWN | %newpointer_flags);
+}
+%enddef
+OEVIBE_DIRECTORIN_COPY(OEVIBE::MolecularSystem)
+OEVIBE_DIRECTORIN_COPY(OEVIBE::EngineSettings)
+OEVIBE_DIRECTORIN_COPY(OEVIBE::EvaluationRequest)
+
+// %naturalvar gives a container member value semantics, but a member of a wrapped class type
+// still comes back as a bare pointer into its parent with ownership off, and no ``_parent``
+// keepalive can save it: ``find_method(engine, method).method`` outlives its temporary, and the
+// parent of a member read inside a director callback may itself be a borrowed view. Within the
+// engine structs these two cross as copies; the typemaps are cleared after Engine.h so that
+// CalculationOptions' getters, which Python already holds through ``_parent``, keep the
+// behavior Plan A tested.
+%define OEVIBE_COPY_REF_OUT(Type...)
+%typemap(out) Type& {
+    $result = SWIG_NewPointerObj(new Type(*$1), $descriptor(Type*),
+                                 SWIG_POINTER_OWN | %newpointer_flags);
+}
+%typemap(out) const Type& = Type&;
+%enddef
+OEVIBE_COPY_REF_OUT(OEVIBE::Method)
+OEVIBE_COPY_REF_OUT(OEVIBE::Solvent)
 
 // The engine structs are plain data that Python both fills and reads, so every member that is
 // not a primitive crosses as a copy: a sequence or mapping going in, a tuple, dict or owned
@@ -874,8 +915,24 @@ OEVIBE_SAFE_VECTOR(std::vector<OEVIBE::KeywordSpec>)
     $result = std::shared_ptr<OEVIBE::EngineSession>(guard, session);
 }
 %include "oevibe/Engine.h"
+%clear OEVIBE::Method&;
+%clear const OEVIBE::Method&;
+%clear OEVIBE::Solvent&;
+%clear const OEVIBE::Solvent&;
+// Indexing an EngineVector hands back an owned shared_ptr copy, not a pointer into the
+// vector's storage, so this one needs only the usual hardening.
 OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 %template(EngineVector) std::vector<std::shared_ptr<OEVIBE::Engine> >;
+
+// %shared_ptr keeps a registered engine's C++ director alive, but a director's ``self`` is
+// borrowed, so the last Python reference going away leaves every later callback -- the first
+// of which is the GetName inside the next Calculation -- reading freed memory. The module
+// therefore keeps every engine it registers for the life of the process (spec 8.7). Nothing is
+// ever dropped: registering over a name replaces it in the registry, but a Calculation built
+// earlier still holds a shared_ptr to the engine it resolved and goes on calling it.
+%pythonappend OEVIBE::EngineRegistry::Register %{
+    _REGISTERED_ENGINES.append(engine)
+%}
 %include "oevibe/EngineRegistry.h"
 
 %include "oevibe/Constraints.h"
@@ -1003,6 +1060,12 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 import enum as _enum
 
 __version__ = "0.1.0"
+
+# Every engine ever registered from Python, kept alive for the life of the process: a
+# registered engine's C++ director borrows its Python object, so dropping the last reference
+# would leave the registry calling into freed memory (see the Register keepalive in
+# swig/oevibe.i).
+_REGISTERED_ENGINES = []
 
 OEVibeError = _oevibe.OEVibeError
 OptionsError = _oevibe.OptionsError

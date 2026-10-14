@@ -10,6 +10,9 @@ from oevibe.oevibe import (
     BondOrder,
     BondOrderVector,
     DoubleVector,
+    KeywordSpecVector,
+    MethodCapabilitiesVector,
+    MethodVector,
     StringStringMap,
     StringVector,
     UnsignedDoubleMap,
@@ -40,8 +43,16 @@ _RAW_ITERATOR_METHODS = (
     "value_iterator",
 )
 
-# Indexing a BondOrderVector returns a pointer into its storage, which a reference to the vector
-# keeps allocated but not in place, so any of these would leave elements taken earlier dangling.
+# Indexing any of these returns a pointer into the vector's storage, which a reference to the
+# vector keeps allocated but not in place, so any mutator below would leave elements taken
+# earlier dangling. An EngineVector is absent because its elements are owned shared_ptr copies.
+_ELEMENT_BORROWING_VECTORS = (
+    BondOrderVector,
+    MethodVector,
+    MethodCapabilitiesVector,
+    KeywordSpecVector,
+)
+
 # The slice names cover SWIG versions that still generate them.
 _STORAGE_MUTATORS = (
     "append",
@@ -106,8 +117,11 @@ def test_result_structs_are_read_only(butanol_conformers):
         oevibe.OptimizationStats().iterations = 3
 
 
-def test_bond_order_vector_cannot_move_its_storage():
-    assert [name for name in _STORAGE_MUTATORS if hasattr(BondOrderVector, name)] == []
+@pytest.mark.parametrize(
+    "vector_type", _ELEMENT_BORROWING_VECTORS, ids=lambda cls: cls.__name__
+)
+def test_vectors_of_class_elements_cannot_move_their_storage(vector_type):
+    assert [name for name in _STORAGE_MUTATORS if hasattr(vector_type, name)] == []
 
 
 def test_bond_order_vector_reads_and_keeps_its_elements_alive():
