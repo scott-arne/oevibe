@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 
 from .oevibe import OptionsError, _MolFuncEngine
 
 
 def _is_openeye_type(kind) -> bool:
-    """:returns: Whether ``kind`` is defined in one of OpenEye's binding modules.
+    """:returns: Whether ``kind`` is the class one of OpenEye's binding modules exports.
 
     OpenEye's SWIG proxies report a bare module name such as ``oeff``, which is importable as
-    ``openeye.oeff``; a Python-defined subclass reports its own module, which is not.
+    ``openeye.oeff``. That the module imports proves nothing on its own, because
+    ``type.__module__`` is writable: a Python-defined subclass that claims ``oeff`` would pass.
+    So the test is identity -- ``kind`` must BE the object ``openeye.<module>`` exports under
+    ``kind``'s own ``__name__``, which no subclass can arrange.
     """
     try:
-        return importlib.util.find_spec(f"openeye.{kind.__module__}") is not None
+        module = importlib.import_module(f"openeye.{kind.__module__}")
     except (ImportError, ValueError):
         return False
+    return getattr(module, kind.__name__, None) is kind
 
 
 def _as_molfunc1(potential):

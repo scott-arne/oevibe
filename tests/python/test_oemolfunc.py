@@ -123,6 +123,78 @@ def test_a_python_defined_potential_is_rejected():
         oevibe.MolFuncEngine("py", "1.0", oevibe.Method("nope"), MyPotential())
 
 
+def test_a_python_defined_potential_cannot_spoof_its_module():
+    """``type.__module__`` is writable, so the exclusion cannot be a module-name test.
+
+    A subclass that claims ``oeff`` used to reach the native constructor and die there with
+    ``SWIG director pure virtual method called`` instead of the ``TypeError`` spec 8.8 promises.
+    """
+
+    class Spoofed(oeff.OEMolFunc1):
+        __module__ = "oeff"
+
+        def __init__(self):
+            oeff.OEMolFunc1.__init__(self)
+
+        def CreateCopy(self):
+            copy = Spoofed()
+            copy.__disown__()
+            return copy
+
+        def Setup(self, mol):
+            return True
+
+        def NumVar(self):
+            return 0
+
+        def GetFComponents(self, coords):
+            return None
+
+        def __call__(self, *args):
+            return 0.0
+
+    with pytest.raises(TypeError, match="PythonEngine"):
+        oevibe.MolFuncEngine("spoofed", "1.0", oevibe.Method("nope"), Spoofed())
+
+
+def test_a_python_subclass_of_an_openeye_potential_cannot_spoof_its_module():
+    """The same spoof over a concrete potential used to be accepted outright.
+
+    ``MolFuncEngine`` then wrapped native MMFF behaviour while the caller believed the subclass
+    was in play, so the overridden method below has to stay uncalled.
+    """
+    calls = []
+
+    class Spoofed(oeff.OEMMFF):
+        __module__ = "oeff"
+
+        def CreateCopy(self):
+            calls.append("CreateCopy")
+            raise AssertionError("the subclass must never be used as a potential")
+
+    with pytest.raises(TypeError, match="PythonEngine"):
+        oevibe.MolFuncEngine(
+            "spoofed-mmff", "1.0", oevibe.Method("nope"), Spoofed(True)
+        )
+    assert calls == []
+
+
+def test_a_python_subclass_cannot_spoof_the_name_of_a_real_potential():
+    """Spoofing ``__name__`` as well still fails: ``oeff.OEMMFF`` is not this class."""
+
+    class Spoofed(oeff.OEMMFF):
+        __module__ = "oeff"
+
+    # Assigned after the class body: a class-body ``__name__`` lands in the class dict, where
+    # ``type.__name__`` does not read it.
+    Spoofed.__name__ = "OEMMFF"
+
+    with pytest.raises(TypeError, match="PythonEngine"):
+        oevibe.MolFuncEngine(
+            "spoofed-named", "1.0", oevibe.Method("nope"), Spoofed(True)
+        )
+
+
 def test_the_raw_constructor_rejects_an_unadjusted_proxy():
     """The pointer inside an OEMMFF proxy is 48 bytes away from its OEMolFunc1 subobject."""
     from oevibe.oevibe import _MolFuncEngine
