@@ -166,10 +166,10 @@ def test_a_python_copy_is_collected_when_its_last_reference_goes(butanol_conform
     """Why ``Copy`` exists at all: ``CreateCopy`` cannot be collectable and stay correct.
 
     ``OEMolFunc1::CreateCopy() const`` is caller-owns, so the adapter has to ``__disown__()``
-    what it returns -- right when OpenEye's C++ is the caller, and a leak when Python is, since
-    then nothing ever takes the ownership Python gave up. Collectability is the thing asserted,
-    with weakrefs and a forced collection, because the defect is an unreachable object rather
-    than a large one.
+    what it returns -- right when the copy is on its way to a C++ owner, and a leak when it is
+    not, since then nothing ever takes the ownership Python gave up. Collectability is the thing
+    asserted, with weakrefs and a forced collection, because the defect is an unreachable object
+    rather than a large one.
     """
     mol = oechem.OEMol(butanol_conformers)
     function = oevibe.as_oemolfunc(mmff_options())
@@ -186,11 +186,15 @@ def test_a_python_copy_is_collected_when_its_last_reference_goes(butanol_conform
     assert inner() is None, "the C++ EngineMolFunc has to go with its adapter"
 
     disowned = function.CreateCopy()
-    assert not disowned.this.own(), "CreateCopy still hands ownership to its C++ caller"
+    assert not disowned.this.own(), "CreateCopy still gives its copy's ownership away"
 
 
 def test_create_copy_hands_an_owned_copy_to_an_openeye_holder(butanol_conformers):
-    """The disown path, exercised the way OpenEye exercises it.
+    """The disown path, taken the only way anything can take it.
+
+    Not "the path OpenEye's C++ uses": OpenEye never calls ``CreateCopy`` on this adapter, as
+    the limitation pinned at the bottom of this file shows. It is Python that makes the copy
+    and gives a C++ owner the ownership, which is the single use the disowned form has left.
 
     ``OEGenericFF`` is a C++ owner only when it is asked to be. ``Add`` defaults to
     ``own=False``, which borrows: a disowned copy added that way is deleted by nobody, so the
@@ -552,13 +556,14 @@ def _child_environment():
     return environment
 
 
-def _run_child(source, timeout=300):
-    """:returns: The stdout of ``source`` run in a fresh interpreter; fails on a crash.
+def _child_process(source, timeout=300):
+    """:returns: ``source`` run to completion in a fresh interpreter, whatever became of it.
 
-    ``timeout`` bounds the run, so a child that never terminates fails the test rather than
-    hanging the suite.
+    The caller judges the exit status, which is the point: one case below expects the child to
+    die. ``timeout`` bounds the run, so a child that never terminates fails the test rather
+    than hanging the suite.
     """
-    child = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-c", source],
         env=_child_environment(),
         capture_output=True,
@@ -566,6 +571,11 @@ def _run_child(source, timeout=300):
         timeout=timeout,
         check=False,
     )
+
+
+def _run_child(source, timeout=300):
+    """:returns: The stdout of ``source`` run in a fresh interpreter; fails on a crash."""
+    child = _child_process(source, timeout)
     assert child.returncode == 0, child.stdout + child.stderr
     return child.stdout
 
@@ -710,3 +720,74 @@ def test_a_failing_engine_under_oebfgsopt_does_not_kill_the_process(fail_after):
     # beyond the fifth being the line search rejecting the infinite step and giving up.
     assert int(reported["CALLS"]) <= fail_after + 5, reported["CALLS"]
     assert float(reported["SECONDS"]) < 30.0, reported["SECONDS"]
+
+
+# The one thing a caller must not do with the adapter, and the reason ``CreateCopy``'s disown
+# can only ever be exercised from Python. Both halves build the same holder; only the potential
+# inside it differs.
+_CPLUSPLUS_COPY_CHILD = """
+from openeye import oechem, oeff, oeomega
+
+import oevibe
+
+mol = oechem.OEMol()
+assert oechem.OESmilesToMol(mol, "CCCCO")
+build = oeomega.OEOmegaOptions()
+build.SetMaxConfs(1)
+assert oeomega.OEOmega(build).Build(mol) == oeomega.OEOmegaReturnCode_Success
+
+{build_function}
+holder = oeff.OEGenericFF()
+assert holder.Add(function)
+print("HELD", flush=True)
+duplicate = oeff.OEGenericFF(holder)
+print("COPIED", type(duplicate).__name__, flush=True)
+"""
+
+_ADAPTER_POTENTIAL = """
+options = oevibe.CalculationOptions()
+options.SetMethod(oevibe.Method("mmff94s"))
+function = oevibe.as_oemolfunc(options)
+assert function.Setup(mol)
+"""
+
+_NATIVE_POTENTIAL = """
+function = oeff.OEMMFF(True)
+assert function.PrepMol(mol, False, True)
+assert function.Setup(mol)
+"""
+
+
+def test_known_limitation_a_cplusplus_copy_of_the_adapter_kills_the_process():
+    """OpenEye's inability to copy the adapter, pinned as the limitation it is.
+
+    This asserts a defect rather than behaviour anyone wants. ``OEMolFunc1::CreateCopy`` is
+    absent from the ``oeff.OEMolFunc1`` proxy, so the director raises
+    ``Swig::DirectorPureVirtualException`` instead of reaching the adapter's override, and an
+    OpenEye API that copies the potential takes the interpreter down -- ``OEGenericFF``'s copy
+    constructor being the case found. Nothing written in Python changes that, so the limitation
+    is documented on :func:`oevibe.as_oemolfunc` and held still here.
+
+    The control keeps the claim honest: copying a holder of OpenEye's own ``OEMMFF`` succeeds,
+    so this is a limitation of the Python-defined subclass and not of ``OEGenericFF``. Should
+    the first half stop aborting, OpenEye has begun dispatching ``CreateCopy``, and this test
+    failing is how we learn that the docstrings warning about it can be rewritten.
+
+    A child process is the only way to assert any of it -- in-process the abort would take the
+    rest of the suite with it -- and the timeout is what stops a hang from doing the same
+    slowly.
+    """
+    child = _child_process(
+        _CPLUSPLUS_COPY_CHILD.format(build_function=_ADAPTER_POTENTIAL), timeout=180
+    )
+    assert "HELD" in child.stdout, child.stdout + child.stderr
+    assert "COPIED" not in child.stdout, (
+        "OpenEye now copies the adapter; see the docstring"
+    )
+    assert child.returncode != 0, "the copy returned normally, which it cannot yet do"
+    assert "CreateCopy" in child.stderr, child.stderr
+
+    control = _run_child(
+        _CPLUSPLUS_COPY_CHILD.format(build_function=_NATIVE_POTENTIAL), timeout=180
+    )
+    assert "COPIED" in control, control

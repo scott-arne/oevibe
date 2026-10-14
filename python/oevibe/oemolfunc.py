@@ -9,12 +9,15 @@ not compose: an ``as_oemolfunc`` adapter is a Python-defined subclass, which the
 
 The predicates in between belong to the inbound half, the only one that has to judge what it was
 handed. The outbound half judges nothing, since it builds the class it hands out; what it has
-instead are two conventions to know before reading it. One is an ownership split, ``CreateCopy``
-being OpenEye's caller-owns hook and ``Copy`` the Python-owned sibling. The other is that its
-``__call__`` never raises: an exception leaving a director becomes a
-``Swig::DirectorMethodException`` that nothing in OpenEye's optimizers catches, which aborts the
-process, so a failed evaluation is recorded, warned about and reported as an infinite energy
-instead.
+instead are three conventions to know before reading it. One is an ownership split, ``Copy``
+keeping its copy in Python and ``CreateCopy`` giving one away to a C++ owner the caller passes
+it to. The second is that its ``__call__`` never raises: an exception leaving a director becomes
+a ``Swig::DirectorMethodException`` that nothing in OpenEye's optimizers catches, which aborts
+the process, so a failed evaluation is recorded, warned about and reported as an infinite energy
+instead. The third is that OpenEye's own C++ cannot copy the adapter at all: ``CreateCopy`` is
+absent from the ``oeff.OEMolFunc1`` proxy, and the director raises
+``Swig::DirectorPureVirtualException`` instead of calling the override, so the process dies the
+moment an OpenEye API needs a copy. :func:`as_oemolfunc` documents what that rules out.
 
 Spec 8.8 accepts OpenEye-defined potentials only, so the predicates below have to tell an
 OpenEye-defined class from anything else. What they achieve, and what they do not:
@@ -352,6 +355,18 @@ def as_oemolfunc(options):
     optimizer. ``GetEvaluationError()`` returns the first exception an evaluation raised, or
     ``None`` if none did; a run that hit one has a meaningless result, whatever it returned.
 
+    **Never hand the returned object to an OpenEye API that copies the potential: the process
+    aborts, and no Python exception precedes it.** ``OEMolFunc1::CreateCopy`` is pure virtual in
+    C++ but absent from the ``oeff.OEMolFunc1`` proxy, so OpenEye's director cannot reach a
+    Python subclass's copy method and raises ``Swig::DirectorPureVirtualException``, which
+    nothing catches. The known case is composition: the adapter may be added to an
+    ``oeff.OEGenericFF`` and used through it, but copy-constructing that holder --
+    ``oeff.OEGenericFF(holder)`` -- kills the interpreter, where that same copy succeeds for a
+    holder of one of OpenEye's own potentials. The supported use is driving an OpenEye optimizer
+    directly, ``oeff.OEBFGSOpt()(function, xs, out)``; measured, all seven of ``oeff``'s
+    first-derivative optimizers take the adapter to a minimum, which they could not do if they
+    needed a copy of it.
+
     :param options: An ``oevibe.CalculationOptions``.
     :returns: An ``openeye.oeff.OEMolFunc1`` subclass instance. It is not thread-safe; its
         ``Copy()`` makes the independent, Python-owned copy a worker thread needs.
@@ -370,8 +385,8 @@ def as_oemolfunc(options):
         """One OEVibe calculation presented to OpenEye.
 
         Not thread-safe -- it caches the last geometry it was evaluated at -- so give each
-        thread its own, made with :meth:`Copy`. :meth:`CreateCopy` is OpenEye's hook and gives
-        its result away to C++; see there.
+        thread its own, made with :meth:`Copy`. :meth:`CreateCopy` gives its result away to a
+        C++ owner instead, and OpenEye's own code never calls it; see there.
 
         An instance holds no reference to the caller's ``CalculationOptions``: the C++
         ``EngineMolFunc`` copied them at construction, and both copy methods go through C++, so
@@ -393,12 +408,23 @@ def as_oemolfunc(options):
             self._evaluation_error: Exception | None = None
 
         def CreateCopy(self):
-            """OpenEye's copy hook, for OpenEye's C++ to call.
+            """A copy whose ownership is already given away, for a C++ owner to take.
 
-            ``OEMolFunc1::CreateCopy() const`` is caller-owns, so the copy is disowned here and
-            whoever asked for it deletes it. A Python caller cannot honour that contract -- it
-            would be holding an object it no longer owns and nothing else ever will -- so Python
-            should call :meth:`Copy` instead.
+            OpenEye never calls this. ``OEMolFunc1::CreateCopy() const`` is pure virtual in C++
+            and caller-owns, but OpenEye's binding leaves it out of the ``oeff.OEMolFunc1``
+            proxy, and the director raises ``Swig::DirectorPureVirtualException`` -- aborting
+            the process -- rather than dispatching to this method, so OpenEye's C++ cannot copy
+            this adapter at all. :func:`as_oemolfunc` documents what that rules out. The gap is
+            specific to the potential hierarchy: no ``oeff`` potential class wraps
+            ``CreateCopy``, while other OpenEye classes that are subclassed from Python do --
+            ``oechem.OEUnaryAtomPred`` and ``oeff.OELineMinimize`` among them.
+
+            What remains is the one case Python can reach: a caller who makes the copy itself
+            and hands it to a C++ owner, as in ``oeff.OEGenericFF().Add(copy, True)``. That is
+            why the disown stays, and why the method keeps OpenEye's name -- if a later release
+            wraps ``CreateCopy``, this is the method that starts being called, and it already
+            honours the contract. For a copy Python keeps, use :meth:`Copy`; this one leaks,
+            since nothing otherwise takes the ownership given up here.
 
             :returns: A disowned copy with the same options, not yet set up on a molecule.
             """
