@@ -7,10 +7,21 @@ the criterion that moved and a case whose geometry disagrees still has to meet t
 Every tolerance is read from ``manifest["tolerances"]``, which ``test_acceptance_manifest.py``
 pins to those literal numbers, so neither number can drift without the other.
 
+The three criteria agree with each other only while both optimizers are in the same basin, so
+spec 12.3 waives the RMSD and step-count criteria for a case that leaves the reference basin
+downhill: landing lower than xtb is a pass on its own, and penalising the geometry and the step
+count for the descent that got there would penalise OEVibe for outperforming the reference. Two
+conditions are both necessary for the waiver -- the case is named in ``BETTER_MINIMUM_CASES``,
+and its final energy is below the reference by MORE than the energy tolerance. Within the
+tolerance is the same basin, where both criteria are meaningful and stay enforced, and a case
+nobody listed keeps both criteria whatever its energy does. A waived case still has to converge
+and still has to meet the energy criterion itself. The comment on ``BETTER_MINIMUM_CASES``
+records why the pin is load-bearing rather than bookkeeping.
+
 Run with ``pytest -m acceptance``. The suite needs ``OEVIBE_TBLITE_LIBRARY``; nothing here runs
 xtb, it only consumes the geometries xtb 6.7.1 produced.
 
-Five of the 37 references do not meet all three criteria. They are strict xfails listed in
+Four of the 37 references do not meet all three criteria. They are strict xfails listed in
 ``KNOWN_DIVERGENCES`` with the measurement behind each; see the comment there.
 
 What each criterion can and cannot catch, measured on this reference set:
@@ -52,16 +63,6 @@ MANIFEST_PATH = ACCEPTANCE_DIR / "manifest.json"
 # recorded as strict xfails so the suite reports the state it is actually in and fails the
 # moment a case starts agreeing. The numbers are from the run that first measured them.
 KNOWN_DIVERGENCES: dict[tuple[str, str], str] = {
-    ("glycine-thorough", "rmsd"): (
-        "OEVibe reaches a different, lower glycine conformer than xtb --opt tight: heavy-atom "
-        "RMSD 0.128 Angstrom at 2.35 kcal/mol BELOW tblite at the xtb geometry. The FAST and "
-        "STANDARD glycine references agree (0.014 and 0.005 Angstrom), so this is the THOROUGH "
-        "thresholds letting the optimizer leave xtb's basin, not a broken comparison."
-    ),
-    ("glycine-thorough", "steps"): (
-        "55 iterations against xtb's 17, ratio 3.24: the extra steps are the descent out of "
-        "xtb's basin into the lower minimum described on the RMSD xfail."
-    ),
     ("metformin-fast", "rmsd"): (
         "0.070 Angstrom from the xtb minimum. Metformin's biguanide torsions are nearly flat; "
         "all four metformin references miss on geometry and energy together."
@@ -82,6 +83,37 @@ KNOWN_DIVERGENCES: dict[tuple[str, str], str] = {
         "0.072 kcal/mol above tblite at the xtb geometry."
     ),
 }
+
+# The cases granted spec 12.3's better-minimum waiver, pinned by hand rather than read off the
+# run. An expectation derived from the data under test proves nothing, and the waiver is the
+# one change here that could hide a regression: a case that may waive its own geometry and step
+# count the moment it comes in low has a universal escape hatch, and an optimizer that overshot
+# into some lower basin would buy its own exemption with the very defect under test. So
+# membership of this set is NECESSARY for the waiver, and being more than the energy tolerance
+# below the reference is necessary too -- a listed case that comes back inside the tolerance
+# fails rather than keeping a waiver it no longer earns.
+#
+# Membership cannot be inferred from the energy condition alone, because at the 0.01 kcal/mol
+# energy tolerance that condition does not separate basins. Measured over the 37 references,
+# six finish more than 0.01 kcal/mol below tblite at the xtb geometry:
+#
+#     glycine-thorough                -2.3519 kcal/mol   RMSD 0.1277 A    55 steps / xtb 17
+#     caffeine-standard               -0.0354 kcal/mol   RMSD 0.0065 A    27 steps / xtb 24
+#     paracetamol-fast                -0.0343 kcal/mol   RMSD 0.0036 A     5 steps / xtb  6
+#     lidocaine-standard              -0.0152 kcal/mol   RMSD 0.0376 A    20 steps / xtb 23
+#     lidocaine-constrained-standard  -0.0152 kcal/mol   RMSD 0.0376 A    20 steps / xtb 23
+#     paracetamol-standard-water      -0.0119 kcal/mol   RMSD 0.0224 A    21 steps / xtb 22
+#
+# The lower five are the SAME minimum converged a shade tighter than xtb stopped at: every one
+# is well inside the 0.05 Angstrom tolerance and at or below xtb's step count, so they pass the
+# waived criteria today and waiving them would delete five live checks. Their margins also sit
+# on a continuum through -0.0099 (theophylline-standard) and down to zero, with no gap at the
+# tolerance to divide on. The gap is between -0.035 and -2.35: glycine-thorough is 66 times
+# further down, 0.128 Angstrom away, and spent 3.24 times xtb's steps getting there. The FAST
+# and STANDARD glycine references stay in xtb's basin (0.014 and 0.005 Angstrom), so that is
+# the THOROUGH thresholds letting the optimizer walk out of the basin and downhill, not a
+# broken comparison. That is the one case the waiver is for.
+BETTER_MINIMUM_CASES = frozenset({"glycine-thorough"})
 
 
 def _collect() -> tuple[dict[str, dict], dict[str, dict]]:
@@ -136,7 +168,7 @@ class Agreement:
 def _agreement(identifier: str) -> Agreement:
     """Optimize one case's input and measure it against the committed xtb geometry.
 
-    Memoized because the four tests below each assert on one part of the same run, and the run
+    Memoized because the tests below each assert on one part of the same run, and the run
     costs a GFN2 optimization. ``oevibe.optimize`` writes the optimized coordinates back into
     the molecule it is given, which is why the RMSD is taken against ``start`` afterwards.
 
@@ -196,6 +228,33 @@ def _case(identifier: str) -> dict:
     return CASES[identifier]
 
 
+def _takes_the_better_minimum_waiver(identifier: str, manifest: dict) -> bool:
+    """Whether spec 12.3's better-minimum waiver applies to this case.
+
+    Two conditions, both necessary. The case is named in ``BETTER_MINIMUM_CASES``, and its
+    final energy is below tblite's single point at the xtb geometry by MORE than the energy
+    tolerance. Within the tolerance is the reference's own basin, where the RMSD and
+    step-count criteria are meaningful and stay enforced; a case nobody listed never takes the
+    waiver at all, so it keeps both criteria whatever its energy does.
+
+    :param identifier: The case id.
+    :param manifest: The committed acceptance manifest, read for the energy tolerance.
+    :returns: True when the RMSD and step-count criteria are waived for this case.
+    :raises AssertionError: When a listed case no longer earns the waiver.
+    """
+    if identifier not in BETTER_MINIMUM_CASES:
+        return False
+    tolerance = manifest["tolerances"]["energy_kcal_per_mol"]
+    difference = _agreement(identifier).energy_difference
+    assert difference < -tolerance, (
+        f"{identifier} holds the better-minimum waiver but finished {difference:+.4f} kcal/mol "
+        f"against tblite at the xtb geometry, not more than {tolerance} kcal/mol below it. It "
+        "is in the reference basin now, so it no longer earns the waiver: take it out of "
+        "BETTER_MINIMUM_CASES and let the RMSD and step-count criteria apply to it again."
+    )
+    return True
+
+
 @pytest.mark.parametrize("identifier", _parameters("status"))
 def test_the_optimization_converges(identifier):
     """Everything below reads a number off this run, so it has to be a real one.
@@ -210,10 +269,32 @@ def test_the_optimization_converges(identifier):
     assert agreement.iterations >= 1
 
 
+@pytest.mark.parametrize("identifier", sorted(BETTER_MINIMUM_CASES))
+def test_the_pinned_better_minimum_case_still_leaves_the_reference_basin(
+    identifier, acceptance_manifest
+):
+    """Every case holding the waiver is a real case that still earns it.
+
+    The RMSD and step-count tests already fail a listed case that climbs back inside the energy
+    tolerance, but only while the manifest still lists that case. This closes the other way the
+    pin could decay quietly: a waiver left behind for a case id that was renamed or dropped is
+    never exercised again, so it would sit in the set granting nothing and nobody would know.
+    """
+    _case(identifier)
+    assert _takes_the_better_minimum_waiver(identifier, acceptance_manifest)
+
+
 @pytest.mark.parametrize("identifier", _parameters("rmsd"))
 def test_the_heavy_atom_rmsd_is_within_the_tolerance(identifier, acceptance_manifest):
-    """Spec 12.3: heavy-atom RMSD below 0.05 Angstrom from the xtb minimum."""
+    """Spec 12.3: heavy-atom RMSD below 0.05 Angstrom from the xtb minimum.
+
+    Waived for a pinned case that finished more than the energy tolerance below the reference:
+    it is not in the reference's basin, so its distance from the reference geometry is not a
+    defect. Every other case is held to the tolerance however low its energy came in.
+    """
     _case(identifier)
+    if _takes_the_better_minimum_waiver(identifier, acceptance_manifest):
+        return
     tolerance = acceptance_manifest["tolerances"]["heavy_atom_rmsd_angstrom"]
     rmsd = _agreement(identifier).heavy_atom_rmsd
     # OERMSD reports "no match" as -1.0, which is below every tolerance there could be.
@@ -246,8 +327,16 @@ def test_the_final_energy_is_no_higher_than_tblite_at_the_xtb_geometry(
 
 @pytest.mark.parametrize("identifier", _parameters("steps"))
 def test_the_step_count_is_within_the_ratio_of_xtb_s(identifier, acceptance_manifest):
-    """Spec 12.3: step count within 1.3 times xtb's own optimization cycle count."""
+    """Spec 12.3: step count within 1.3 times xtb's own optimization cycle count.
+
+    Waived for a pinned case that finished more than the energy tolerance below the reference:
+    those steps bought a lower minimum than xtb stopped at, so counting them against xtb's
+    budget for a different, higher one compares two different pieces of work. Every other case
+    is held to the ratio however low its energy came in.
+    """
     _case(identifier)
+    if _takes_the_better_minimum_waiver(identifier, acceptance_manifest):
+        return
     ratio = acceptance_manifest["tolerances"]["step_ratio"]
     agreement = _agreement(identifier)
     assert agreement.iterations <= ratio * agreement.xtb_cycles, (

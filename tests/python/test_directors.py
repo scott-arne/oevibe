@@ -13,7 +13,7 @@ from openeye import oechem
 import oevibe
 from oevibe import oevibe as _proxy
 
-LIVE_SESSIONS = []
+LIVE_SESSIONS: list[int] = []
 
 
 class SpringSession(oevibe.EngineSession):
