@@ -86,11 +86,23 @@ private:
 /// the spec 12.1 round trip, which ``StubPotential``'s zero energy cannot. OpenEye's own
 /// gradient-only potential, ``OEHarmonicPotential``, is no substitute: it evaluates flat after
 /// its ``CreateCopy()``, which is the copy every session gets.
+///
+/// The gradient it reports is deliberately not the derivative of that energy: it carries the
+/// extra ``SkewAt`` term. Central differences of a quadratic are exact, so without a term only
+/// the two-argument call can produce, a session that numerically differentiated the energy
+/// while still advertising ``analytic_gradient`` would satisfy every assertion below. The
+/// potential is therefore non-conservative, which is deliberate and harmless here: nothing in
+/// the adapter integrates it or minimizes on it.
 class QuadraticPotential : public OEMolPotential::OEMolFunc1 {
 public:
     /// :returns: The force constant for variable ``k``, in kcal/mol/Angstrom^2. It differs per
     ///     variable so that a transposed or shifted index mapping cannot cancel out.
     static double StiffnessAt(std::size_t k) { return 1.0 + static_cast<double>(k); }
+
+    /// :returns: The marker added to variable ``k``'s reported gradient, in kcal/mol/Angstrom.
+    ///     It is what separates the analytic gradient from a numerical one, so it is per
+    ///     variable and far larger than the finite-difference noise it has to outrun.
+    static double SkewAt(std::size_t k) { return 100.0 + static_cast<double>(k); }
 
     static double EnergyAt(const std::vector<double>& x) {
         double energy = 0.0;
@@ -98,6 +110,12 @@ public:
             energy += 0.5 * StiffnessAt(k) * x[k] * x[k];
         }
         return energy;
+    }
+
+    /// :returns: The gradient component this potential reports for variable ``k``: the
+    ///     derivative of ``EnergyAt`` plus ``SkewAt``.
+    static double GradientAt(const std::vector<double>& x, std::size_t k) {
+        return StiffnessAt(k) * x[k] + SkewAt(k);
     }
 
     bool Setup(const OEChem::OEMolBase& mol) override {
@@ -124,7 +142,7 @@ public:
             // here is a matter of being a faithful stand-in, not something the tests below
             // discriminate: MolFuncSession hands over a freshly zeroed buffer
             // (src/core/MolFuncSession.cpp), so an overwriting potential would pass identically.
-            g[k] += StiffnessAt(k) * x[k];
+            g[k] += StiffnessAt(k) * x[k] + SkewAt(k);
         }
         return energy;
     }
@@ -247,8 +265,7 @@ TEST(MolFuncEngineTest, GradientOnlyPrototypeRoundTripsEnergyAndGradient) {
     EXPECT_NEAR(energy, QuadraticPotential::EnergyAt(x), 1e-9 * std::abs(energy));
 
     // The gradient the session reports comes from OEMolFunc1::operator()(x, g), which
-    // accumulates into a buffer the session owns; finite differences of the energy are what
-    // pin that it was neither dropped nor double-counted.
+    // accumulates into a buffer the session owns.
     const std::vector<double> analytic = gradient_at(*session, x);
     ASSERT_EQ(analytic.size(), x.size());
     // Evaluating twice pins the other half of that arrangement: every call starts from a
@@ -264,7 +281,15 @@ TEST(MolFuncEngineTest, GradientOnlyPrototypeRoundTripsEnergyAndGradient) {
         const double numeric = (session->Evaluate(plus, EvaluationRequest()).energy -
                                 session->Evaluate(minus, EvaluationRequest()).energy) /
                                (2.0 * step);
-        EXPECT_NEAR(analytic[k], numeric, 1e-6 * std::max(1.0, std::abs(numeric))) << k;
+        // Two facts, and the second is the one with teeth. Finite differences of this
+        // quadratic are exact, so matching them pins the index mapping and that nothing was
+        // dropped or double-counted; but they are reproducible from the energy-only overload,
+        // so on their own they would not tell an analytic gradient from a numerical one. The
+        // skew the two-argument call adds is reproducible no other way.
+        EXPECT_NEAR(analytic[k], QuadraticPotential::GradientAt(x, k),
+                    1e-9 * std::max(1.0, std::abs(analytic[k])))
+            << k;
+        EXPECT_NEAR(analytic[k] - numeric, QuadraticPotential::SkewAt(k), 1e-6) << k;
     }
 
     // The capability and the session agree: there is no Hessian to ask for. Every OEVibe error
