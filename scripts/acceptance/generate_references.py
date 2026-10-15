@@ -22,6 +22,9 @@ unconstrained runs, byte-identical to their unconstrained twins', and say so in 
 
 A molecule whose run fails is reported and skipped rather than aborting the whole generation, and
 --only merges into the manifest already on disk, so a failed molecule can be redone on its own.
+Nothing reaches tests/data/acceptance until every selected molecule has succeeded: the run
+generates into a staging directory seeded from the committed tree and promotes it at the end, so
+a partial run cannot leave fresh geometries beside stale hashes in the committed set.
 """
 
 from __future__ import annotations
@@ -46,7 +49,12 @@ from molecules import DATA_DIR, MOLECULES, PRESET_LEVELS, AcceptanceMolecule
 CONVERGED = re.compile(r"GEOMETRY OPTIMIZATION CONVERGED AFTER\s+(\d+)\s+ITERATIONS")
 TOTAL_ENERGY = re.compile(r"TOTAL ENERGY\s+(-?\d+\.\d+)\s+Eh")
 XYZ_ENERGY = re.compile(r"energy:\s*(-?\d+\.\d+)")
-VERSION_LINE = re.compile(r"(xtb version .*?)(?:\s+compiled by|$)")
+VERSION_LINE = re.compile(r"(xtb version (\d+(?:\.\d+)*).*?)(?:\s+compiled by|$)")
+
+# Spec 12.3 pins the references to one xtb release, and the release stamps itself into every
+# geometry it writes. A set generated under another one is internally consistent and still not
+# comparable, so the generator refuses the binary rather than leaving the gate to notice.
+PINNED_XTB_VERSION = "6.7.1"
 
 # Spec 12.3 bounds the RMSD over heavy atoms; the name carries the qualifier so that a consumer
 # cannot compute an all-atom RMSD against it.
@@ -369,14 +377,23 @@ def xtb_version(xtb: str) -> str:
 
     The tail of that line names the machine and the account xtb was built on; it is cut, because
     the manifest records which xtb produced the data, not where anyone's copy came from.
+
+    :raises SystemExit: When the binary is not the pinned release, or prints no version line.
     """
     finished = subprocess.run(
         [xtb, "--version"], capture_output=True, text=True, check=False
     )
     for line in (finished.stdout + finished.stderr).splitlines():
         found = VERSION_LINE.search(" ".join(line.split()))
-        if found is not None:
-            return found.group(1)
+        if found is None:
+            continue
+        if found.group(2) != PINNED_XTB_VERSION:
+            raise SystemExit(
+                f"{xtb} is xtb {found.group(2)}; the acceptance references are pinned to "
+                f"{PINNED_XTB_VERSION} and generating under another release would publish "
+                "data the integrity gate must reject"
+            )
+        return found.group(1)
     raise SystemExit("xtb --version printed no version line")
 
 
@@ -418,48 +435,67 @@ def molecule_entry(molecule: AcceptanceMolecule, input_xyz: Path) -> dict:
     }
 
 
-def previous_manifest() -> dict:
+def previous_manifest(root: Path) -> dict:
     """:returns: The manifest already on disk, or empty lists when there is none.
 
     Generating the whole set takes minutes, so --only has to leave the molecules it skipped in
     place rather than publishing a manifest that covers one molecule.
     """
-    path = DATA_DIR / "manifest.json"
+    path = root / "manifest.json"
     if not path.is_file():
         return {"molecules": [], "cases": []}
     return json.loads(path.read_text())
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--xtb", required=True, help="path to the xtb 6.7.1 binary")
-    parser.add_argument("--regenerate-inputs", action="store_true")
-    parser.add_argument(
-        "--only", action="append", default=[], help="limit to these titles"
-    )
-    parser.add_argument(
-        "--scratch", help="directory to run xtb in (default: the system temp)"
-    )
-    arguments = parser.parse_args()
+def staging_tree() -> Path:
+    """:returns: A copy of the committed references to generate into.
 
-    titles = {molecule.title for molecule in MOLECULES}
-    unknown = sorted(set(arguments.only) - titles)
-    if unknown:
-        raise SystemExit(f"--only names no such molecule: {', '.join(unknown)}")
+    Cases are written as they complete, so generating straight into the committed tree leaves a
+    failed run holding fresh geometries beside the hashes and energies of the previous run. The
+    copy is a sibling of the committed tree so that promoting it is a rename rather than a copy,
+    and seeding it from the committed tree is what lets an existing input.xyz be reused and an
+    --only rerun keep the molecules it did not touch.
+    """
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=DATA_DIR.parent))
+    if DATA_DIR.is_dir():
+        shutil.copytree(DATA_DIR, staging, dirs_exist_ok=True)
+    return staging
 
-    environment = xtb_environment(arguments.xtb)
-    carried = previous_manifest()
+
+def promote(staging: Path) -> None:
+    """Replace the committed references with the staging tree, one rename at a time."""
+    replaced = DATA_DIR.with_name(DATA_DIR.name + ".replaced")
+    if replaced.exists():
+        shutil.rmtree(replaced)
+    if DATA_DIR.exists():
+        DATA_DIR.rename(replaced)
+    staging.rename(DATA_DIR)
+    if replaced.exists():
+        shutil.rmtree(replaced)
+
+
+def generate(
+    arguments: argparse.Namespace,
+    environment: dict[str, str],
+    version: str,
+    staging: Path,
+) -> tuple[dict, list[str]]:
+    """Generate the selected molecules into ``staging``.
+
+    :returns: The manifest covering the whole set, and one message per failed molecule. Every
+        file is written under ``staging``; nothing here touches the committed tree.
+    """
+    carried = previous_manifest(staging)
     entries = {entry["title"]: entry for entry in carried["molecules"]}
     cases: dict[str, list[dict]] = {}
     for case in carried["cases"]:
         cases.setdefault(case["title"], []).append(case)
 
     failures = []
-    started = time.monotonic()
     for molecule in MOLECULES:
         if arguments.only and molecule.title not in arguments.only:
             continue
-        out_dir = DATA_DIR / molecule.title
+        out_dir = staging / molecule.title
         out_dir.mkdir(parents=True, exist_ok=True)
         input_xyz = out_dir / "input.xyz"
         if arguments.regenerate_inputs or not input_xyz.exists():
@@ -528,7 +564,7 @@ def main() -> None:
 
     ordered = [molecule.title for molecule in MOLECULES if molecule.title in entries]
     manifest = {
-        "xtb_version": xtb_version(arguments.xtb),
+        "xtb_version": version,
         "tblite_version": tblite_version(),
         # XTBPATH is recorded relative to the binary's own prefix, so the record stays
         # machine-independent; the thread count is recorded because it reaches the numbers.
@@ -541,18 +577,51 @@ def main() -> None:
         "molecules": [entries[title] for title in ordered],
         "cases": [case for title in ordered for case in cases.get(title, [])],
     }
-    (DATA_DIR / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    return manifest, failures
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--xtb", required=True, help="path to the xtb 6.7.1 binary")
+    parser.add_argument("--regenerate-inputs", action="store_true")
+    parser.add_argument(
+        "--only", action="append", default=[], help="limit to these titles"
     )
+    parser.add_argument(
+        "--scratch", help="directory to run xtb in (default: the system temp)"
+    )
+    arguments = parser.parse_args()
+
+    titles = {molecule.title for molecule in MOLECULES}
+    unknown = sorted(set(arguments.only) - titles)
+    if unknown:
+        raise SystemExit(f"--only names no such molecule: {', '.join(unknown)}")
+
+    environment = xtb_environment(arguments.xtb)
+    # Both checks run before any xtb job starts, so an unusable binary costs nothing.
+    version = xtb_version(arguments.xtb)
+
+    started = time.monotonic()
+    staging = staging_tree()
+    try:
+        manifest, failures = generate(arguments, environment, version, staging)
+        (staging / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
+        if failures:
+            print(f"{len(failures)} molecules failed, so nothing was published:")
+            for failure in failures:
+                print(f"  {failure}")
+            print(f"{DATA_DIR} is as it was; rerun with --only for the failures")
+            raise SystemExit(1)
+        promote(staging)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
     print(
         f"wrote {DATA_DIR / 'manifest.json'}: {len(manifest['cases'])} cases "
         f"in {time.monotonic() - started:.1f} s"
     )
-    if failures:
-        print(f"{len(failures)} molecules failed and are not in the manifest:")
-        for failure in failures:
-            print(f"  {failure}")
-        raise SystemExit(1)
 
 
 if __name__ == "__main__":
