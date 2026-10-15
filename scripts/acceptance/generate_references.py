@@ -24,7 +24,9 @@ A molecule whose run fails is reported and skipped rather than aborting the whol
 --only merges into the manifest already on disk, so a failed molecule can be redone on its own.
 Nothing reaches tests/data/acceptance until every selected molecule has succeeded: the run
 generates into a staging directory seeded from the committed tree and promotes it at the end, so
-a partial run cannot leave fresh geometries beside stale hashes in the committed set.
+a partial run cannot leave fresh geometries beside stale hashes in the committed set. A promotion
+that fails part-way puts the committed tree back, and a run started after one that was killed
+part-way refuses rather than publishing over the surviving copy.
 """
 
 from __future__ import annotations
@@ -462,14 +464,53 @@ def staging_tree() -> Path:
     return staging
 
 
+def interrupted_promotion() -> str | None:
+    """:returns: What the operator must do when a previous run died mid-promotion, else None.
+
+    Promotion renames the committed tree aside before renaming staging into place, so a run
+    killed between the two leaves no ``tests/data/acceptance`` and a ``.replaced`` holding the
+    only copy of it. Seeding staging from an absent committed tree starts it empty, so a later
+    --only run would regenerate one molecule, delete the backup and publish the result. Which
+    molecules the backup is missing cannot be known from here -- the interrupted run may have
+    been a full regeneration or an --only rerun -- so this state is refused rather than guessed
+    at.
+    """
+    replaced = DATA_DIR.with_name(DATA_DIR.name + ".replaced")
+    if not replaced.exists() or DATA_DIR.exists():
+        return None
+    return (
+        f"{DATA_DIR} is absent and {replaced} is present, which is how a run killed during "
+        f"promotion leaves the tree: {replaced.name} holds the complete reference set and is "
+        f"the only copy of it. Restore it before generating again:\n"
+        f"    mv {replaced} {DATA_DIR}\n"
+        f"then check it against the gate with: pytest tests/python -m acceptance"
+    )
+
+
 def promote(staging: Path) -> None:
-    """Replace the committed references with the staging tree, one rename at a time."""
+    """Replace the committed references with the staging tree, one rename at a time.
+
+    :raises SystemExit: When a previous run left the committed tree only as ``.replaced``;
+        deleting that backup here is the one action that loses the reference set outright.
+    """
+    refusal = interrupted_promotion()
+    if refusal is not None:
+        raise SystemExit(refusal)
     replaced = DATA_DIR.with_name(DATA_DIR.name + ".replaced")
     if replaced.exists():
         shutil.rmtree(replaced)
     if DATA_DIR.exists():
         DATA_DIR.rename(replaced)
-    staging.rename(DATA_DIR)
+    try:
+        staging.rename(DATA_DIR)
+    except BaseException:
+        # Between the two renames the committed tree exists only as .replaced. Put it back
+        # before the failure propagates, so no later run ever sees that state. BaseException
+        # rather than Exception because a Ctrl-C lands here as KeyboardInterrupt, which is the
+        # likeliest way this window is hit at all.
+        if replaced.exists() and not DATA_DIR.exists():
+            replaced.rename(DATA_DIR)
+        raise
     if replaced.exists():
         shutil.rmtree(replaced)
 
@@ -596,6 +637,12 @@ def main() -> None:
     unknown = sorted(set(arguments.only) - titles)
     if unknown:
         raise SystemExit(f"--only names no such molecule: {', '.join(unknown)}")
+
+    # Checked before anything is generated: a run that cannot publish should not cost the
+    # minutes it takes to produce the data it would then refuse to write.
+    refusal = interrupted_promotion()
+    if refusal is not None:
+        raise SystemExit(refusal)
 
     environment = xtb_environment(arguments.xtb)
     # Both checks run before any xtb job starts, so an unusable binary costs nothing.
