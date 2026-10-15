@@ -42,7 +42,15 @@ def _checked_float(name: str, value: Any) -> float:
     # verbs report every invalid option as OptionsError, and the C++ setters check the range.
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise _core.OptionsError(f"{name} must be a number, got {value!r}")
-    return float(value)
+    try:
+        return float(value)
+    except (OverflowError, ValueError) as error:
+        # numbers.Real admits values no double can hold -- a large int, a large Fraction --
+        # and float() raises on those. The value is left out of the message because its repr
+        # can run to thousands of digits.
+        raise _core.OptionsError(
+            f"{name} must be a number a double can hold"
+        ) from error
 
 
 def _enum_value(

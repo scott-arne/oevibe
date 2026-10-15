@@ -1,5 +1,7 @@
 """Every invalid verb option is an OptionsError, and value types are hashable."""
 
+from fractions import Fraction
+
 import pytest
 
 import oevibe
@@ -89,6 +91,30 @@ def test_method_and_solvent_are_hashable():
     }
     assert len(solvents) == 3
     assert hash(oevibe.Method("MMFF94S")) == hash(oevibe.Method("mmff94s"))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Spelled as ids because pytest builds a parameter id by str()ing the value, and
+        # Python refuses to render a 10001-digit integer.
+        pytest.param(10**10000, id="huge-int"),
+        pytest.param(-(10**10000), id="huge-negative-int"),
+        pytest.param(Fraction(10**10000, 3), id="huge-fraction"),
+    ],
+)
+def test_a_real_too_large_for_a_double_is_an_options_error(value):
+    # numbers.Real admits values no double can hold -- a big int, a big Fraction -- and float()
+    # raises OverflowError rather than TypeError on those, so the guard above is not enough.
+    with pytest.raises(oevibe.OptionsError):
+        _verbs._checked_float("temperature", value)
+
+
+def test_a_verb_reports_an_unrepresentable_temperature_as_an_options_error(
+    butanol_conformers,
+):
+    with pytest.raises(oevibe.OptionsError):
+        oevibe.frequencies(butanol_conformers, method="mmff94", temperature=10**10000)
 
 
 def test_a_hashed_method_key_survives_its_options_changing():
