@@ -2,6 +2,9 @@
 
 Each test gives the surviving view its own owner. A shared owner would let one view's link
 keep the memory valid for another view whose own link is missing.
+
+``CalculationOptions.GetMethod`` and ``GetSolvent`` are the two exceptions, and the first two
+tests pin them as such: they hand back an owned copy, which needs no link at all.
 """
 
 import gc
@@ -15,27 +18,41 @@ def _reuse_freed_memory():
     return [oevibe.CalculationOptions() for _ in range(64)]
 
 
-def test_method_view_outlives_its_options():
+def test_the_method_getter_returns_an_independent_copy():
+    # Method is an immutable value type with value equality and a hash, so a borrowed view
+    # into CalculationOptions' storage would change value underneath a key already in a set.
+    # It crosses as a copy instead, which is why this getter carries no _parent link: the
+    # absence is asserted so the project-wide keepalive rule is not reapplied to it by reflex.
     opts = oevibe.CalculationOptions()
     opts.SetMethod(oevibe.Method("mmff94"))
-    method_view = opts.GetMethod()
+    method = opts.GetMethod()
+    assert not hasattr(method, "_parent")
+
+    opts.SetMethod(oevibe.Method("sage"))
+    assert method.GetName() == "mmff94"
+
     del opts
     gc.collect()
     reused = _reuse_freed_memory()
 
-    assert method_view.GetName() == "mmff94"
+    assert method.GetName() == "mmff94"
     assert len(reused) == 64
 
 
-def test_solvent_view_outlives_its_options():
+def test_the_solvent_getter_returns_an_independent_copy():
     opts = oevibe.CalculationOptions()
     opts.SetSolvent(oevibe.Solvent("water"))
-    solvent_view = opts.GetSolvent()
+    solvent = opts.GetSolvent()
+    assert not hasattr(solvent, "_parent")
+
+    opts.SetSolvent(oevibe.Solvent("octanol"))
+    assert solvent.GetName() == "water"
+
     del opts
     gc.collect()
     reused = _reuse_freed_memory()
 
-    assert solvent_view.GetName() == "water"
+    assert solvent.GetName() == "water"
     assert len(reused) == 64
 
 

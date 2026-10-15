@@ -89,3 +89,70 @@ def test_method_and_solvent_are_hashable():
     }
     assert len(solvents) == 3
     assert hash(oevibe.Method("MMFF94S")) == hash(oevibe.Method("mmff94s"))
+
+
+def test_a_hashed_method_key_survives_its_options_changing():
+    # GetMethod hands back a copy, so a Method already used as a key keeps the value it was
+    # hashed under. A borrowed view into the options' storage would rehash when the options
+    # were given another method, and the set entry would become unreachable.
+    options = oevibe.CalculationOptions()
+    options.SetMethod(oevibe.Method("mmff94s"))
+    key = options.GetMethod()
+    keys = {key}
+    before = hash(key)
+    options.SetMethod(oevibe.Method("gfn2-xtb"))
+
+    assert key.GetName() == "mmff94s"
+    assert hash(key) == before
+    assert key in keys
+
+
+def test_a_hashed_solvent_key_survives_its_options_changing():
+    options = oevibe.CalculationOptions()
+    options.SetSolvent(oevibe.Solvent("water", oevibe.SolventModel.ALPB))
+    key = options.GetSolvent()
+    keys = {key}
+    before = hash(key)
+    options.SetSolvent(oevibe.Solvent("octanol", oevibe.SolventModel.GBSA))
+
+    assert key.GetName() == "water"
+    assert key.GetModel() == oevibe.SolventModel.ALPB
+    assert hash(key) == before
+    assert key in keys
+
+
+class _RenamedMethod(oevibe.Method):
+    """Reports a name other than the one it stores, which is what ``__eq__`` compares."""
+
+    def GetName(self):
+        return "renamed-" + super().GetName()
+
+
+class _RenamedSolvent(oevibe.Solvent):
+    """Reports a name other than the one it stores, which is what ``__eq__`` compares."""
+
+    def GetName(self):
+        return "renamed-" + super().GetName()
+
+
+def test_a_method_hashes_on_what_equality_compares():
+    # __eq__ is C++ operator==, which reads the stored name. A __hash__ routed through the
+    # overridable GetName() would disagree with it for a subclass that renames itself, so two
+    # objects that compare equal would fail to find each other in a set.
+    base = oevibe.Method("mmff94s")
+    renamed = _RenamedMethod("mmff94s")
+
+    assert renamed == base
+    assert hash(renamed) == hash(base)
+    assert base in {renamed}
+    assert renamed in {base}
+
+
+def test_a_solvent_hashes_on_what_equality_compares():
+    base = oevibe.Solvent("water", oevibe.SolventModel.ALPB)
+    renamed = _RenamedSolvent("water", oevibe.SolventModel.ALPB)
+
+    assert renamed == base
+    assert hash(renamed) == hash(base)
+    assert base in {renamed}
+    assert renamed in {base}

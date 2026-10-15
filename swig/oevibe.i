@@ -753,8 +753,9 @@ static bool oevibe_is_instance(PyObject* value, PyObject* type) {
 %pythonappend OEVIBE::ScanOptions::GetOptimizerOptions %{ val._parent = self %}
 %pythonappend OEVIBE::ScanResult::GetPoint %{ val._parent = self %}
 %pythonappend OEVIBE::ScanResult::GetProvenance %{ val._parent = self %}
-%pythonappend OEVIBE::CalculationOptions::GetMethod %{ val._parent = self %}
-%pythonappend OEVIBE::CalculationOptions::GetSolvent %{ val._parent = self %}
+// CalculationOptions::GetMethod and GetSolvent are deliberately absent from that list: they
+// return copies rather than views (see OEVIBE_COPY_REF_OUT around the %include of Options.h),
+// and a copy has no parent to keep alive.
 
 // Energy, Gradient, Optimize, Frequencies, and Scan release the GIL (above), so the molecule they
 // read must not be shared with another thread that is using it.
@@ -791,17 +792,23 @@ than one thread at a time."
 // SWIG maps operator== to __eq__, which makes Python drop the default __hash__ and leaves these
 // value types unusable as dictionary keys. Both hash on exactly what __eq__ compares:
 // Method::operator== compares the (lowercased) name and Solvent::operator== the name and model.
+//
+// Both read the stored fields through the flattened accessors rather than through self.GetName()
+// and self.GetModel(). __eq__ is C++ operator==, which a Python subclass cannot intercept, so a
+// hash that went through the overridable proxy methods would disagree with equality for any
+// subclass that reports something other than what it stores -- equal objects hashing apart,
+// which is the half of the contract a container actually depends on.
 %extend OEVIBE::Method {
 %pythoncode %{
     def __hash__(self):
-        return hash(self.GetName())
+        return hash(_oevibe.Method_GetName(self))
 %}
 }
 
 %extend OEVIBE::Solvent {
 %pythoncode %{
     def __hash__(self):
-        return hash((self.GetName(), int(self.GetModel())))
+        return hash((_oevibe.Solvent_GetName(self), int(_oevibe.Solvent_GetModel(self))))
 %}
 }
 
@@ -1062,7 +1069,20 @@ OEVIBE_SAFE_VECTOR(std::vector<std::shared_ptr<OEVIBE::Engine> >)
 %include "oevibe/EngineRegistry.h"
 
 %include "oevibe/Constraints.h"
+// CalculationOptions' two class-valued getters take the same owned-copy treatment as the engine
+// structs, for a second reason on top of lifetime. Method and Solvent have value equality and a
+// hash, and they have no setters, so Python treats them as immutable values; a borrowed view
+// into the options' storage would change value under a key already in a dict or a set, which
+// SetMethod on the parent is enough to do. The typemaps are cleared again right after the
+// %include: this is the two getters, not a general policy for reference-returning getters,
+// which keep the ``_parent`` keepalive above.
+OEVIBE_COPY_REF_OUT(OEVIBE::Method)
+OEVIBE_COPY_REF_OUT(OEVIBE::Solvent)
 %include "oevibe/Options.h"
+%clear OEVIBE::Method&;
+%clear const OEVIBE::Method&;
+%clear OEVIBE::Solvent&;
+%clear const OEVIBE::Solvent&;
 // EngineMolFunc reaches Python only as the engine behind as_oemolfunc: its OEMolFunc2 base means
 // nothing across the runtime boundary, so the raw-pointer operators stay hidden and Python uses
 // the vector-based Evaluate (spec 8.8).
