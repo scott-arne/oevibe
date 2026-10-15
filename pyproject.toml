@@ -94,7 +94,8 @@ exclude = [
 src = [".", "python"]
 extend-exclude = [
     "python/oevibe/oevibe.py", "python/oevibe/_build_info.py", "build", "build-*", "spikes",
-    "scripts",
+    # Shared verbatim with the sibling cmake-openeye projects, so it is not formatted here.
+    "scripts/build_python.py",
 ]
 
 [tool.ruff.lint.per-file-ignores]
