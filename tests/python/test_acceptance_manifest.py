@@ -9,6 +9,10 @@ Limits worth knowing before relying on this module. A number with no committed f
 a single-point energy, an optimizer cycle count, an individual wavenumber -- can only be
 re-derived by running xtb again, which the acceptance suite does not do. Those are bounded for
 plausibility here, not pinned. Everything that does have a file behind it is pinned exactly.
+
+Nothing here runs xtb, but the module carries the ``acceptance`` marker: spec 12.3's suite is run
+with ``pytest -m acceptance``, and that command must not skip the check that the data the suite
+benchmarks against is the data the manifest describes.
 """
 
 from __future__ import annotations
@@ -20,6 +24,8 @@ import pathlib
 import re
 
 import pytest
+
+pytestmark = pytest.mark.acceptance
 
 DATA_DIR = pathlib.Path(__file__).resolve().parents[2] / "tests" / "data" / "acceptance"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
@@ -43,6 +49,37 @@ XYZ_XTB = re.compile(r"xtb:\s*(.+?)\s*$")
 
 # Anything that would tie the committed data to the machine that generated it.
 MACHINE_TEXT = re.compile(r"(/Users/|/home/|[A-Za-z]:\\\\|\S+@\S+|\.local\b)")
+
+# Spec 12.3's tolerances under names that carry the qualifier the spec attaches to them: the RMSD
+# the spec bounds is over heavy atoms, and a bare "rmsd" invites an all-atom comparison instead.
+SPEC_TOLERANCES = {
+    "heavy_atom_rmsd_angstrom": 0.05,
+    "energy_kcal_per_mol": 0.01,
+    "step_ratio": 1.3,
+    "frequency_cm1": 2.0,
+    "frequency_floor_cm1": 50.0,
+    "constraint_angstrom": 1e-4,
+    "constraint_degrees": 1e-3,
+    "single_point_hartree": 1e-6,
+}
+
+# The settings every reference was generated under. The OpenMP thread count moves an optimized
+# geometry in the fifth decimal, so it is pinned and recorded rather than inherited from whoever
+# ran the generator; XTBPATH is written relative to the binary's own prefix.
+XTB_ENVIRONMENT = {
+    "OMP_NUM_THREADS": "1",
+    "XTBHOME": None,
+    "XTBPATH": "${xtb prefix}/share/xtb",
+}
+
+# How a frequency case lays its wavenumbers out. This is xtb's convention, not OEVibe's:
+# ``Result::GetImaginaryModeCount()`` counts every negative frequency among the 3N-6 values
+# ``src/core/Frequencies.h`` returns with the rigid-body modes projected out, so neither the
+# length nor the count is comparable to a manifest entry without this layout in hand.
+WAVENUMBER_LAYOUT = (
+    "3N values in xtb vibspectrum order: six near-zero translations and rotations first, "
+    "then the 3N-6 vibrations ascending"
+)
 
 
 @pytest.fixture(scope="module")
@@ -124,6 +161,36 @@ def _expected_command(case: dict, charge: int) -> list[str]:
     raise AssertionError(f"unknown case kind {case['kind']!r}")
 
 
+def _expected_identifier(case: dict) -> str:
+    """:returns: The identifier the case's own recorded settings call for.
+
+    Anchoring the identifier is what keeps ``solvent`` honest: the command line is rebuilt from
+    ``solvent``, so flipping it to ``null`` and dropping ``--alpb water`` from the command agrees
+    with itself, and only the ``-water`` the identifier carries contradicts it.
+    """
+    title = case["title"]
+    if case["kind"] == "optimization":
+        return f"{title}-{case['preset']}" + ("-water" if case["solvent"] else "")
+    if case["kind"] == "frequencies":
+        return f"{title}-hessian"
+    if case["kind"] == "single_point":
+        return f"{title}-gfn0-sp"
+    raise AssertionError(f"unknown case kind {case['kind']!r}")
+
+
+def _expected_geometry(case: dict) -> str:
+    """:returns: The reference file the case's kind and identifier call for."""
+    title = case["title"]
+    if case["kind"] == "optimization":
+        return f"{title}/{case['id']}.xyz"
+    if case["kind"] == "frequencies":
+        # The Hessian is taken at xtb's own STANDARD optimized geometry, not at the input.
+        return f"{title}/{title}-standard.xyz"
+    if case["kind"] == "single_point":
+        return f"{title}/input.xyz"
+    raise AssertionError(f"unknown case kind {case['kind']!r}")
+
+
 def _charges(manifest: dict) -> dict[str, int]:
     return {molecule["title"]: molecule["charge"] for molecule in manifest["molecules"]}
 
@@ -132,6 +199,21 @@ def test_the_manifest_records_the_pinned_xtb_and_a_tblite_version(manifest):
     assert PINNED_XTB_VERSION in manifest["xtb_version"], manifest["xtb_version"]
     tblite = manifest["tblite_version"]
     assert re.match(r"\d+\.\d+\.\d+ build \S+", tblite), tblite
+
+
+def test_the_manifest_records_the_tolerances_spec_12_3_sets(manifest):
+    """The names are part of the contract: ``heavy_atom_rmsd_angstrom`` says which atoms count."""
+    assert manifest["tolerances"] == SPEC_TOLERANCES
+
+
+def test_the_manifest_records_the_environment_its_references_came_from(manifest):
+    """A setting that moves the numbers and is not recorded makes the data unreproducible.
+
+    ``OMP_NUM_THREADS`` is the one that bites: naproxen at STANDARD lands 1.9e-5 Angstrom away at
+    one thread from where it lands at fourteen. That is three orders below every tolerance here,
+    but spec 12.3 asks for the settings, so the generator pins the thread count and records it.
+    """
+    assert manifest["xtb_environment"] == XTB_ENVIRONMENT
 
 
 def test_the_manifest_names_every_committed_file_and_no_others(manifest):
@@ -156,14 +238,23 @@ def test_every_input_geometry_matches_its_recorded_hash(manifest):
         )
 
 
-def test_every_optimized_geometry_matches_its_recorded_hash(manifest):
+def test_every_case_geometry_matches_its_recorded_hash(manifest):
+    """Every kind, not just the optimizations: the hash is what makes a repointed case show up."""
     for case in manifest["cases"]:
-        if "geometry_sha256" not in case:
-            continue
         path = DATA_DIR / case["geometry"]
         assert _sha256(path) == case["geometry_sha256"], (
-            f"{path} is not the file that was written"
+            f"{case['id']}: {path} is not the file the run used"
         )
+
+
+def test_every_case_identifier_follows_the_settings_recorded_beside_it(manifest):
+    for case in manifest["cases"]:
+        assert case["id"] == _expected_identifier(case), case
+
+
+def test_every_case_names_the_geometry_file_its_kind_and_identifier_call_for(manifest):
+    for case in manifest["cases"]:
+        assert case["geometry"] == _expected_geometry(case), case["id"]
 
 
 def test_every_command_line_follows_the_settings_recorded_beside_it(manifest):
@@ -223,6 +314,34 @@ def test_every_case_geometry_keeps_the_elements_of_its_input(manifest):
         assert elements == inputs[case["title"]], case["id"]
 
 
+def test_no_optimization_reference_was_run_under_a_constraint(manifest):
+    """Nothing in the committed data was optimized under a constraint, and every case says so.
+
+    The two ``*-constrained`` molecules duplicate their twins byte for byte; only their names
+    suggest otherwise. Spec 12.3's constrained clause is self-referential -- a constrained
+    optimization holds its constraint -- so the reference it needs is the value measured on the
+    hash-pinned input, which is ``molecules[].constraints``, not an xtb geometry. The label and
+    the pointer are here so a consumer cannot RMSD a constrained result against an unconstrained
+    reference and believe it checked something.
+    """
+    constrained = {
+        molecule["title"]
+        for molecule in manifest["molecules"]
+        if molecule["constraints"]
+    }
+    assert constrained, "no molecule declares a constraint"
+    for case in manifest["cases"]:
+        if case["kind"] != "optimization":
+            continue
+        assert case["constrained"] is False, case["id"]
+        expected = (
+            f"molecules[{case['title']}].constraints"
+            if case["title"] in constrained
+            else None
+        )
+        assert case["constraint_reference"] == expected, case["id"]
+
+
 def test_every_constraint_value_measures_the_committed_input(manifest):
     for molecule in manifest["molecules"]:
         title = molecule["title"]
@@ -244,11 +363,13 @@ def test_every_frequency_case_has_one_wavenumber_per_degree_of_freedom(manifest)
     """3N wavenumbers: the six near-zero translations and rotations, then the rest ascending.
 
     xtb emits the translations and rotations first whatever their value and the vibrations in
-    ascending order after them, so the ordering is part of what a consumer indexes by.
+    ascending order after them, so the ordering is part of what a consumer indexes by, and each
+    case states it rather than leaving it to be discovered.
     """
     for case in manifest["cases"]:
         if case["kind"] != "frequencies":
             continue
+        assert case["wavenumber_layout"] == WAVENUMBER_LAYOUT, case["id"]
         atoms = _read_xyz(DATA_DIR / case["geometry"])
         wavenumbers = case["wavenumbers_cm1"]
         assert len(wavenumbers) == 3 * len(atoms), case["id"]
@@ -258,19 +379,24 @@ def test_every_frequency_case_has_one_wavenumber_per_degree_of_freedom(manifest)
         assert vibrations == sorted(vibrations), case["id"]
 
 
-def test_every_frequency_case_counts_its_own_imaginary_modes(manifest):
+def test_every_frequency_case_counts_its_imaginary_modes_below_the_floor(manifest):
     """Not every reference geometry is a minimum, so the count is recorded rather than assumed.
 
     The urea reference is the planar saddle point xtb's optimizer reaches from the OMEGA input;
     its two imaginary modes are a property of the committed data, and a consumer that silently
     assumed real frequencies would be reading it wrong.
+
+    The field counts the vibrations below ``-frequency_floor_cm1``, which is NOT what
+    ``Result::GetImaginaryModeCount()`` counts: that is every negative frequency, over the 3N-6
+    values that remain once the rigid-body modes are projected out. The name says which of the
+    two this is, so they cannot be compared by accident.
     """
     floor = manifest["tolerances"]["frequency_floor_cm1"]
     for case in manifest["cases"]:
         if case["kind"] != "frequencies":
             continue
         imaginary = [value for value in case["wavenumbers_cm1"][6:] if value < -floor]
-        assert case["imaginary_modes"] == len(imaginary), case["id"]
+        assert case["imaginary_modes_below_floor"] == len(imaginary), case["id"]
 
 
 def test_every_single_point_energy_is_a_plausible_gfn0_energy(manifest):

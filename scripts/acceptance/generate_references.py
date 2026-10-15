@@ -10,9 +10,15 @@ It writes tests/data/acceptance/, which is committed; the acceptance tests never
 existing input.xyz is reused unless --regenerate-inputs is given, so the reference geometries do
 not move when OMEGA changes.
 
-Every xtb run gets XTBPATH pointing at the parameter directory beside the binary and no XTBHOME,
-because GFN0-xTB's parameters are not compiled in and a stray .xtbrc would silently change the
-settings. Neither path reaches the manifest: it records versions and settings, not this machine.
+Every xtb run gets the same environment: XTBPATH pointing at the parameter directory beside the
+binary, no XTBHOME, and one OpenMP thread. The manifest records all three. No absolute path
+reaches it -- it records versions and settings, not this machine.
+
+No reference run holds a constraint. The two constrained molecules exist so that the value each
+constraint has on the hash-pinned input is measured and recorded in molecules[].constraints,
+which is the whole of what spec 12.3 asks for ("constrained optimizations hold every constraint
+within 1e-4 Angstrom or 1e-3 degrees" is self-referential). Their optimization cases are ordinary
+unconstrained runs, byte-identical to their unconstrained twins', and say so in "constrained".
 
 A molecule whose run fails is reported and skipped rather than aborting the whole generation, and
 --only merges into the manifest already on disk, so a failed molecule can be redone on its own.
@@ -42,8 +48,10 @@ TOTAL_ENERGY = re.compile(r"TOTAL ENERGY\s+(-?\d+\.\d+)\s+Eh")
 XYZ_ENERGY = re.compile(r"energy:\s*(-?\d+\.\d+)")
 VERSION_LINE = re.compile(r"(xtb version .*?)(?:\s+compiled by|$)")
 
+# Spec 12.3 bounds the RMSD over heavy atoms; the name carries the qualifier so that a consumer
+# cannot compute an all-atom RMSD against it.
 TOLERANCES = {
-    "rmsd_angstrom": 0.05,
+    "heavy_atom_rmsd_angstrom": 0.05,
     "energy_kcal_per_mol": 0.01,
     "step_ratio": 1.3,
     "frequency_cm1": 2.0,
@@ -52,6 +60,15 @@ TOLERANCES = {
     "constraint_degrees": 1e-3,
     "single_point_hartree": 1e-6,
 }
+
+
+# xtb's vibspectrum layout, recorded on every frequency case. OEVibe's own frequency list is
+# 3N-6 long with the rigid-body modes projected out (src/core/Frequencies.h), so a consumer that
+# indexed this one the same way would be off by six.
+WAVENUMBER_LAYOUT = (
+    "3N values in xtb vibspectrum order: six near-zero translations and rotations first, "
+    "then the 3N-6 vibrations ascending"
+)
 
 
 class GenerationError(Exception):
@@ -86,8 +103,17 @@ def xtb_environment(xtb: str) -> dict[str, str]:
 
     GFN0-xTB's parameters live in a file rather than in the binary, so without XTBPATH xtb stops
     with "Parameter file param_gfn0-xtb.txt not found!". The directory is derived from the binary
-    so that no machine-specific path has to be supplied, and XTBHOME is dropped so that a .xtbrc
-    found through it cannot change a setting the manifest claims to record.
+    so that no machine-specific path has to be supplied.
+
+    Overwriting XTBPATH is also what keeps an inherited .xtbrc out of the run: measured on xtb
+    6.7.1, a directory holding an .xtbrc changes the settings (electronic temperature 300 ->
+    2000 K) when it is on XTBPATH and has no effect when XTBHOME names it. XTBHOME is dropped
+    anyway, because it seeds the XTBPATH default and nothing here wants it back.
+
+    OMP_NUM_THREADS is pinned because the thread count reaches the numbers: naproxen at STANDARD
+    lands 1.9e-5 Angstrom and 2.1e-9 Eh away at one thread from where it lands at fourteen. That
+    is far below every tolerance in the manifest, but a reference whose generating settings are
+    not recorded cannot be reproduced on another machine, and spec 12.3 asks for the settings.
 
     :raises SystemExit: When the parameter directory is not beside the binary.
     """
@@ -97,6 +123,7 @@ def xtb_environment(xtb: str) -> dict[str, str]:
     environment = dict(os.environ)
     environment.pop("XTBHOME", None)
     environment["XTBPATH"] = str(parameters)
+    environment["OMP_NUM_THREADS"] = "1"
     return environment
 
 
@@ -210,6 +237,12 @@ def optimization_case(
         "energy_hartree": float(energy.group(1)),
         "geometry": f"{molecule.title}/{geometry.name}",
         "geometry_sha256": sha256(geometry),
+        # No xtb run here holds a constraint, not even for the constrained molecules; the
+        # pointer names where the constraint reference for this molecule does live.
+        "constrained": False,
+        "constraint_reference": (
+            f"molecules[{molecule.title}].constraints" if molecule.constraints else None
+        ),
     }
 
 
@@ -251,10 +284,16 @@ def frequency_case(
         "title": molecule.title,
         "kind": "frequencies",
         "geometry": f"{molecule.title}/{optimized.name}",
+        "geometry_sha256": sha256(optimized),
         "command": command,
         # Recorded rather than assumed away: the geometry an optimizer reaches is not always a
         # minimum, and a consumer that took every reference frequency to be real would be wrong.
-        "imaginary_modes": sum(1 for value in wavenumbers[6:] if value < -floor),
+        # The name states the threshold, because Result::GetImaginaryModeCount() counts every
+        # negative frequency and the two numbers would otherwise look comparable.
+        "imaginary_modes_below_floor": sum(
+            1 for value in wavenumbers[6:] if value < -floor
+        ),
+        "wavenumber_layout": WAVENUMBER_LAYOUT,
         "wavenumbers_cm1": wavenumbers,
     }
 
@@ -291,6 +330,7 @@ def single_point_case(
         "kind": "single_point",
         "method": "gfn0-xtb",
         "geometry": f"{molecule.title}/input.xyz",
+        "geometry_sha256": sha256(input_xyz),
         "command": command,
         "energy_hartree": float(energy.group(1)),
     }
@@ -490,8 +530,13 @@ def main() -> None:
     manifest = {
         "xtb_version": xtb_version(arguments.xtb),
         "tblite_version": tblite_version(),
-        # Recorded relative to the binary's own prefix, so the record stays machine-independent.
-        "xtb_environment": {"XTBPATH": "${xtb prefix}/share/xtb", "XTBHOME": None},
+        # XTBPATH is recorded relative to the binary's own prefix, so the record stays
+        # machine-independent; the thread count is recorded because it reaches the numbers.
+        "xtb_environment": {
+            "OMP_NUM_THREADS": "1",
+            "XTBHOME": None,
+            "XTBPATH": "${xtb prefix}/share/xtb",
+        },
         "tolerances": TOLERANCES,
         "molecules": [entries[title] for title in ordered],
         "cases": [case for title in ordered for case in cases.get(title, [])],

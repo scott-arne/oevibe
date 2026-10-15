@@ -15,6 +15,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 4,
       "energy_hartree": -14.297660897404,
       "geometry": "imidazole/imidazole-fast.xyz",
@@ -40,6 +42,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 5,
       "energy_hartree": -14.297664057661,
       "geometry": "imidazole/imidazole-standard.xyz",
@@ -65,6 +69,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 6,
       "energy_hartree": -14.297664822987,
       "geometry": "imidazole/imidazole-thorough.xyz",
@@ -90,15 +96,17 @@
         "0"
       ],
       "geometry": "imidazole/imidazole-standard.xyz",
+      "geometry_sha256": "98de4d79f78235e74838755ec252d065c99628d3c8223e870e2df805c7a0774b",
       "id": "imidazole-hessian",
-      "imaginary_modes": 0,
+      "imaginary_modes_below_floor": 0,
       "kind": "frequencies",
       "title": "imidazole",
+      "wavenumber_layout": "3N values in xtb vibspectrum order: six near-zero translations and rotations first, then the 3N-6 vibrations ascending",
       "wavenumbers_cm1": [
         -0.0,
-        0.0,
-        0.0,
-        0.0,
+        -0.0,
+        -0.0,
+        -0.0,
         0.0,
         0.0,
         573.36,
@@ -140,6 +148,7 @@
       ],
       "energy_hartree": -14.449602731775,
       "geometry": "imidazole/input.xyz",
+      "geometry_sha256": "9944895378c5e7055132f23fe65b083cd0f6fd2582857845d45260fc77de9668",
       "id": "imidazole-gfn0-sp",
       "kind": "single_point",
       "method": "gfn0-xtb",
@@ -160,6 +169,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 12,
       "energy_hartree": -17.873779209463,
       "geometry": "glycine/glycine-fast.xyz",
@@ -185,6 +196,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 16,
       "energy_hartree": -17.873794182944,
       "geometry": "glycine/glycine-standard.xyz",
@@ -210,6 +223,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 17,
       "energy_hartree": -17.873795017128,
       "geometry": "glycine/glycine-thorough.xyz",
@@ -237,6 +252,8 @@
         "--alpb",
         "water"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 15,
       "energy_hartree": -17.889094091688,
       "geometry": "glycine/glycine-standard-water.xyz",
@@ -262,10 +279,12 @@
         "0"
       ],
       "geometry": "glycine/glycine-standard.xyz",
+      "geometry_sha256": "d80414f8b4f190e8e0460de46170f26d868b36848dba6a2e79f250465b0e925a",
       "id": "glycine-hessian",
-      "imaginary_modes": 0,
+      "imaginary_modes_below_floor": 0,
       "kind": "frequencies",
       "title": "glycine",
+      "wavenumber_layout": "3N values in xtb vibspectrum order: six near-zero translations and rotations first, then the 3N-6 vibrations ascending",
       "wavenumbers_cm1": [
         -0.0,
         -0.0,
@@ -315,6 +334,7 @@
       ],
       "energy_hartree": -16.474410748566,
       "geometry": "glycine/input.xyz",
+      "geometry_sha256": "70479fcc5d1e382d936ab95e950566a9259be9cc82c3d656d20cc87face776f4",
       "id": "glycine-gfn0-sp",
       "kind": "single_point",
       "method": "gfn0-xtb",
@@ -335,6 +355,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 5,
       "energy_hartree": -23.113193000411,
       "geometry": "anisole/anisole-fast.xyz",
@@ -360,6 +382,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 6,
       "energy_hartree": -23.113194859246,
       "geometry": "anisole/anisole-standard.xyz",
@@ -385,6 +409,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 7,
       "energy_hartree": -23.113195077644,
       "geometry": "anisole/anisole-thorough.xyz",
@@ -410,10 +436,12 @@
         "0"
       ],
       "geometry": "anisole/anisole-standard.xyz",
+      "geometry_sha256": "756a4f308df33f233e4a99e54b056c285d85a0c859e49fd4c5ac8adf5c7a6b37",
       "id": "anisole-hessian",
-      "imaginary_modes": 0,
+      "imaginary_modes_below_floor": 0,
       "kind": "frequencies",
       "title": "anisole",
+      "wavenumber_layout": "3N values in xtb vibspectrum order: six near-zero translations and rotations first, then the 3N-6 vibrations ascending",
       "wavenumbers_cm1": [
         -0.0,
         -0.0,
@@ -481,6 +509,7 @@
       ],
       "energy_hartree": -22.448800919092,
       "geometry": "anisole/input.xyz",
+      "geometry_sha256": "3e4c40c9db38026f003bb06d3deac9a4001df6759c34a0e14dcc21ed4eca58b1",
       "id": "anisole-gfn0-sp",
       "kind": "single_point",
       "method": "gfn0-xtb",
@@ -501,6 +530,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 6,
       "energy_hartree": -14.097128511102,
       "geometry": "urea/urea-standard.xyz",
@@ -526,15 +557,17 @@
         "0"
       ],
       "geometry": "urea/urea-standard.xyz",
+      "geometry_sha256": "c858fddb03a2730fda41b12d8a2e195fcfc13b09039c7288f2c709df87e1c4f1",
       "id": "urea-hessian",
-      "imaginary_modes": 2,
+      "imaginary_modes_below_floor": 2,
       "kind": "frequencies",
       "title": "urea",
+      "wavenumber_layout": "3N values in xtb vibspectrum order: six near-zero translations and rotations first, then the 3N-6 vibrations ascending",
       "wavenumbers_cm1": [
         -0.0,
         -0.0,
         -0.0,
-        -0.0,
+        0.0,
         0.0,
         0.0,
         -316.04,
@@ -572,6 +605,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 44,
       "energy_hartree": -29.607745192197,
       "geometry": "salicylamide/salicylamide-standard.xyz",
@@ -597,10 +632,12 @@
         "0"
       ],
       "geometry": "salicylamide/salicylamide-standard.xyz",
+      "geometry_sha256": "73297d9b35f61abce2c7e2f302171ac840ae9f2e5be0a76e5b7e9e0a8cdd994f",
       "id": "salicylamide-hessian",
-      "imaginary_modes": 0,
+      "imaginary_modes_below_floor": 0,
       "kind": "frequencies",
       "title": "salicylamide",
+      "wavenumber_layout": "3N values in xtb vibspectrum order: six near-zero translations and rotations first, then the 3N-6 vibrations ascending",
       "wavenumbers_cm1": [
         -0.0,
         -0.0,
@@ -670,6 +707,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 5,
       "energy_hartree": -19.95414584239,
       "geometry": "phenol/phenol-standard.xyz",
@@ -696,6 +735,7 @@
       ],
       "energy_hartree": -19.224124907113,
       "geometry": "phenol/input.xyz",
+      "geometry_sha256": "2097ed91fae5041cf07b249d035a48adf6fbe8ca48721a1c472d84fac75103e0",
       "id": "phenol-gfn0-sp",
       "kind": "single_point",
       "method": "gfn0-xtb",
@@ -716,6 +756,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 13,
       "energy_hartree": -19.31669124912,
       "geometry": "aniline/aniline-standard.xyz",
@@ -741,6 +783,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 11,
       "energy_hartree": -35.940807870411,
       "geometry": "benzocaine/benzocaine-standard.xyz",
@@ -766,6 +810,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 6,
       "energy_hartree": -32.783255365251,
       "geometry": "paracetamol/paracetamol-fast.xyz",
@@ -791,6 +837,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 22,
       "energy_hartree": -32.783627660951,
       "geometry": "paracetamol/paracetamol-standard.xyz",
@@ -816,6 +864,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 27,
       "energy_hartree": -32.783636232438,
       "geometry": "paracetamol/paracetamol-thorough.xyz",
@@ -843,6 +893,8 @@
         "--alpb",
         "water"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 22,
       "energy_hartree": -32.79981789497,
       "geometry": "paracetamol/paracetamol-standard-water.xyz",
@@ -868,6 +920,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 23,
       "energy_hartree": -39.108716567617,
       "geometry": "phenacetin/phenacetin-standard.xyz",
@@ -893,6 +947,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 32,
       "energy_hartree": -39.631850022462,
       "geometry": "aspirin/aspirin-standard.xyz",
@@ -918,10 +974,12 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 40,
-      "energy_hartree": -45.171909085599,
+      "energy_hartree": -45.171909086668,
       "geometry": "ibuprofen/ibuprofen-standard.xyz",
-      "geometry_sha256": "05cbd09ed24b8d59f85c9ad9add906b520fc0d433ea1eb667e3edfc98a053f43",
+      "geometry_sha256": "43648a52dbb695010a7eccb1d01e194f07e307c9e45d8d1c7d0b0517b194160f",
       "id": "ibuprofen-standard",
       "kind": "optimization",
       "preset": "standard",
@@ -943,10 +1001,12 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 62,
-      "energy_hartree": -49.332366169689,
+      "energy_hartree": -49.332366167545,
       "geometry": "naproxen/naproxen-standard.xyz",
-      "geometry_sha256": "b28eafd24d77fbc53e7fb478b31caa1730ecaddb13e51180b564292a57f60a7d",
+      "geometry_sha256": "c59be5f0f38ce54942f029785190a42506fd45673c548ae3cec18c5a4a948e86",
       "id": "naproxen-standard",
       "kind": "optimization",
       "preset": "standard",
@@ -968,6 +1028,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 24,
       "energy_hartree": -42.154417919737,
       "geometry": "caffeine/caffeine-standard.xyz",
@@ -993,6 +1055,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 22,
       "energy_hartree": -38.979702853872,
       "geometry": "theophylline/theophylline-standard.xyz",
@@ -1018,6 +1082,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 22,
       "energy_hartree": -34.396401066676,
       "geometry": "nicotine/nicotine-standard.xyz",
@@ -1043,6 +1109,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 23,
       "energy_hartree": -51.124306748162,
       "geometry": "lidocaine/lidocaine-standard.xyz",
@@ -1068,6 +1136,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 22,
       "energy_hartree": -28.773296692298,
       "geometry": "metformin/metformin-fast.xyz",
@@ -1093,6 +1163,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 29,
       "energy_hartree": -28.773372128529,
       "geometry": "metformin/metformin-standard.xyz",
@@ -1118,6 +1190,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 37,
       "energy_hartree": -28.773395665737,
       "geometry": "metformin/metformin-thorough.xyz",
@@ -1145,6 +1219,8 @@
         "--alpb",
         "water"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 29,
       "energy_hartree": -28.795244558137,
       "geometry": "metformin/metformin-standard-water.xyz",
@@ -1170,6 +1246,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 20,
       "energy_hartree": -37.844145403758,
       "geometry": "pyridoxine/pyridoxine-standard.xyz",
@@ -1197,6 +1275,8 @@
         "--alpb",
         "water"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 20,
       "energy_hartree": -37.868400434837,
       "geometry": "pyridoxine/pyridoxine-standard-water.xyz",
@@ -1222,10 +1302,12 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 15,
       "energy_hartree": -34.120422029567,
       "geometry": "sulfanilamide/sulfanilamide-standard.xyz",
-      "geometry_sha256": "6e4b1aef0e4b0577882b04bc7e945d02eeeef0617418da2e24801abb16af16ba",
+      "geometry_sha256": "c56450ffa32792962910b75f969ed7dd4cc886360df4883f1ad874e5b8c8e2ce",
       "id": "sulfanilamide-standard",
       "kind": "optimization",
       "preset": "standard",
@@ -1247,10 +1329,12 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": null,
       "cycles": 24,
-      "energy_hartree": -41.973176948407,
+      "energy_hartree": -41.973176948334,
       "geometry": "acetazolamide/acetazolamide-standard.xyz",
-      "geometry_sha256": "c4a4b5c657947824603c4c57ab578be409f26646e1b0fc4dd6856bece2645a27",
+      "geometry_sha256": "6f3d406078e7008793a0c2d58a42670deb3c17b5946d799cf4519b39ca4335a2",
       "id": "acetazolamide-standard",
       "kind": "optimization",
       "preset": "standard",
@@ -1272,6 +1356,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": "molecules[aspirin-constrained].constraints",
       "cycles": 32,
       "energy_hartree": -39.631850022462,
       "geometry": "aspirin-constrained/aspirin-constrained-standard.xyz",
@@ -1297,6 +1383,8 @@
         "--uhf",
         "0"
       ],
+      "constrained": false,
+      "constraint_reference": "molecules[lidocaine-constrained].constraints",
       "cycles": 23,
       "energy_hartree": -51.124306748162,
       "geometry": "lidocaine-constrained/lidocaine-constrained-standard.xyz",
@@ -1550,11 +1638,12 @@
     "energy_kcal_per_mol": 0.01,
     "frequency_cm1": 2.0,
     "frequency_floor_cm1": 50.0,
-    "rmsd_angstrom": 0.05,
+    "heavy_atom_rmsd_angstrom": 0.05,
     "single_point_hartree": 1e-06,
     "step_ratio": 1.3
   },
   "xtb_environment": {
+    "OMP_NUM_THREADS": "1",
     "XTBHOME": null,
     "XTBPATH": "${xtb prefix}/share/xtb"
   },
