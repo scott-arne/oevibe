@@ -5,6 +5,11 @@ check that the trust is warranted, so it compares the manifest against the commi
 themselves and deliberately does not import ``scripts/acceptance``: a test that read the
 generator's own tables would agree with the generator however the generator changed.
 
+For the same reason nothing here is derived from the manifest it is checking. The required
+molecules, their charges, their solvents and the case each one must carry are written out below
+from spec 12.3, so a manifest that drops a reference or relabels the settings behind one
+disagrees with this module rather than with itself.
+
 Limits worth knowing before relying on this module. A number with no committed file behind it --
 a single-point energy, an optimizer cycle count, an individual wavenumber -- can only be
 re-derived by running xtb again, which the acceptance suite does not do. Those are bounded for
@@ -17,6 +22,7 @@ benchmarks against is the data the manifest describes.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -30,8 +36,13 @@ pytestmark = pytest.mark.acceptance
 DATA_DIR = pathlib.Path(__file__).resolve().parents[2] / "tests" / "data" / "acceptance"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 
-# Spec 12.3 pins the references to one xtb release; data from another release is not comparable.
-PINNED_XTB_VERSION = "6.7.1"
+# Spec 12.3 pins the references to one xtb release. The whole banner string is pinned, not the
+# release number inside it: a substring test accepts 6.7.10, and a regeneration under such a
+# release stamps its own version into every geometry comment, so the stamps would agree with it
+# too and nothing committed would contradict the claim. Regenerating under another build means
+# changing this constant in the same commit as the data.
+PINNED_XTB_STAMP = "6.7.1 (edcfbbe)"
+PINNED_XTB_VERSION = f"xtb version {PINNED_XTB_STAMP}"
 
 # xtb's optimization levels, which are where the preset thresholds came from (src/Preset.cpp:21).
 PRESET_ARGUMENTS = {
@@ -39,9 +50,6 @@ PRESET_ARGUMENTS = {
     "standard": ("normal", "1.0"),
     "thorough": ("tight", "0.2"),
 }
-
-# The five molecules that also get FAST and THOROUGH references (spec 12.3).
-SUBSET = ("imidazole", "glycine", "anisole", "paracetamol", "metformin")
 
 # xtb writes "energy: <Eh> gnorm: <...> xtb: <version> (<commit>)" as the xyz comment line.
 XYZ_ENERGY = re.compile(r"energy:\s*(-?\d+\.\d+)")
@@ -79,6 +87,169 @@ XTB_ENVIRONMENT = {
 WAVENUMBER_LAYOUT = (
     "3N values in xtb vibspectrum order: six near-zero translations and rotations first, "
     "then the 3N-6 vibrations ascending"
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class RequiredMolecule:
+    """What spec 12.3 requires of one acceptance molecule.
+
+    Charge and solvent are fields of this table rather than of the manifest on purpose. They are
+    what the xtb command line was built from, so reading them back out of the manifest would let
+    a reference be relabelled -- a neutral molecule described as a cation, a water reference
+    described as a methanol one -- with its own command line changed to agree and nothing left to
+    contradict it.
+    """
+
+    # Every molecule in the acceptance set is neutral and closed-shell; a charged or open-shell
+    # addition has to be declared here as well as in the generator.
+    charge: int = 0
+    multiplicity: int = 1
+    presets: tuple[str, ...] = ("standard",)
+    solvents: tuple[str, ...] = ()
+    frequencies: bool = False
+    single_point: bool = False
+    constraints: tuple[tuple[str, tuple[int, ...]], ...] = ()
+
+
+# Spec 12.3: about 20 drug-like molecules plus constrained cases; STANDARD for all of them and a
+# five-molecule subset at FAST and THOROUGH; --alpb water for the solvated cases; --hess
+# frequencies; GFN0-xTB single points. The identities are the plan's roster for this repo, and
+# they are the published interface Tasks 12 and 13 are written against, so a case may be added
+# here but one may not quietly go missing.
+ALL_PRESETS = ("fast", "standard", "thorough")
+
+REQUIRED_MOLECULES: dict[str, RequiredMolecule] = {
+    "imidazole": RequiredMolecule(
+        presets=ALL_PRESETS, frequencies=True, single_point=True
+    ),
+    "glycine": RequiredMolecule(
+        presets=ALL_PRESETS,
+        solvents=("water",),
+        frequencies=True,
+        single_point=True,
+    ),
+    "anisole": RequiredMolecule(
+        presets=ALL_PRESETS, frequencies=True, single_point=True
+    ),
+    "urea": RequiredMolecule(frequencies=True),
+    "salicylamide": RequiredMolecule(frequencies=True),
+    "phenol": RequiredMolecule(single_point=True),
+    "aniline": RequiredMolecule(),
+    "benzocaine": RequiredMolecule(),
+    "paracetamol": RequiredMolecule(presets=ALL_PRESETS, solvents=("water",)),
+    "phenacetin": RequiredMolecule(),
+    "aspirin": RequiredMolecule(),
+    "ibuprofen": RequiredMolecule(),
+    "naproxen": RequiredMolecule(),
+    "caffeine": RequiredMolecule(),
+    "theophylline": RequiredMolecule(),
+    "nicotine": RequiredMolecule(),
+    "lidocaine": RequiredMolecule(),
+    "metformin": RequiredMolecule(presets=ALL_PRESETS, solvents=("water",)),
+    "pyridoxine": RequiredMolecule(solvents=("water",)),
+    "sulfanilamide": RequiredMolecule(),
+    "acetazolamide": RequiredMolecule(),
+    "aspirin-constrained": RequiredMolecule(
+        constraints=(("distance", (0, 1)), ("frozen", (0,)))
+    ),
+    "lidocaine-constrained": RequiredMolecule(
+        constraints=(("dihedral", (4, 5, 6, 7)),)
+    ),
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class RequiredCase:
+    """One reference spec 12.3 requires, and the settings it must have been produced under."""
+
+    title: str
+    kind: str
+    charge: int
+    preset: str | None = None
+    solvent: str | None = None
+    method: str | None = None
+
+    @property
+    def geometry(self) -> str:
+        """:returns: The committed file this case's kind takes its structure from."""
+        if self.kind == "optimization":
+            return f"{self.title}/{_identifier(self)}.xyz"
+        if self.kind == "frequencies":
+            # The Hessian is taken at xtb's own STANDARD optimized geometry, not at the input.
+            return f"{self.title}/{self.title}-standard.xyz"
+        return f"{self.title}/input.xyz"
+
+    @property
+    def command(self) -> list[str]:
+        """:returns: The xtb command line spec 12.3's settings for this case call for."""
+        common = ["--chrg", str(self.charge), "--uhf", "0"]
+        if self.kind == "optimization":
+            assert self.preset is not None
+            level, accuracy = PRESET_ARGUMENTS[self.preset]
+            command = [
+                "xtb",
+                "input.xyz",
+                "--opt",
+                level,
+                "--gfn",
+                "2",
+                "--acc",
+                accuracy,
+            ]
+            command += common
+            if self.solvent is not None:
+                command += ["--alpb", self.solvent]
+            return command
+        if self.kind == "frequencies":
+            return ["xtb", "input.xyz", "--hess", "--gfn", "2", "--acc", "1.0", *common]
+        return ["xtb", "input.xyz", "--sp", "--gfn", "0", "--acc", "1.0", *common]
+
+
+def _identifier(case: RequiredCase) -> str:
+    if case.kind == "optimization":
+        return f"{case.title}-{case.preset}" + (
+            f"-{case.solvent}" if case.solvent else ""
+        )
+    if case.kind == "frequencies":
+        return f"{case.title}-hessian"
+    return f"{case.title}-gfn0-sp"
+
+
+def _required_cases() -> dict[str, RequiredCase]:
+    """:returns: Every reference the spec requires, keyed by the identifier it must carry."""
+    required: dict[str, RequiredCase] = {}
+    for title, molecule in REQUIRED_MOLECULES.items():
+        cases = [
+            RequiredCase(title, "optimization", molecule.charge, preset=preset)
+            for preset in molecule.presets
+        ]
+        # Spec 12.3 solvates at STANDARD only; the FAST and THOROUGH references are gas phase.
+        cases += [
+            RequiredCase(
+                title,
+                "optimization",
+                molecule.charge,
+                preset="standard",
+                solvent=solvent,
+            )
+            for solvent in molecule.solvents
+        ]
+        if molecule.frequencies:
+            cases.append(RequiredCase(title, "frequencies", molecule.charge))
+        if molecule.single_point:
+            cases.append(
+                RequiredCase(title, "single_point", molecule.charge, method="gfn0-xtb")
+            )
+        for case in cases:
+            required[_identifier(case)] = case
+    return required
+
+
+REQUIRED_CASES = _required_cases()
+
+CONSTRAINED_MOLECULES = frozenset(
+    title for title, molecule in REQUIRED_MOLECULES.items() if molecule.constraints
 )
 
 
@@ -138,65 +309,17 @@ def _dihedral_degrees(points: list[tuple[float, float, float]]) -> float:
     return math.degrees(math.atan2(dot(cross(b1, v), w), dot(v, w)))
 
 
-def _expected_command(case: dict, charge: int) -> list[str]:
-    """:returns: The xtb command line the case's own recorded settings call for.
-
-    Derived from the settings rather than copied from the manifest, so a reference regenerated at
-    a different level -- or a command line edited after the fact -- stops agreeing with the entry
-    that describes it.
-    """
-    common = ["--chrg", str(charge), "--uhf", "0"]
-    if case["kind"] == "optimization":
-        level, accuracy = PRESET_ARGUMENTS[case["preset"]]
-        command = ["xtb", "input.xyz", "--opt", level, "--gfn", "2", "--acc", accuracy]
-        command += common
-        if case["solvent"] is not None:
-            command += ["--alpb", case["solvent"]]
-        return command
-    if case["kind"] == "frequencies":
-        return ["xtb", "input.xyz", "--hess", "--gfn", "2", "--acc", "1.0", *common]
-    if case["kind"] == "single_point":
-        assert case["method"] == "gfn0-xtb", case
-        return ["xtb", "input.xyz", "--sp", "--gfn", "0", "--acc", "1.0", *common]
-    raise AssertionError(f"unknown case kind {case['kind']!r}")
-
-
-def _expected_identifier(case: dict) -> str:
-    """:returns: The identifier the case's own recorded settings call for.
-
-    Anchoring the identifier is what keeps ``solvent`` honest: the command line is rebuilt from
-    ``solvent``, so flipping it to ``null`` and dropping ``--alpb water`` from the command agrees
-    with itself, and only the ``-water`` the identifier carries contradicts it.
-    """
-    title = case["title"]
-    if case["kind"] == "optimization":
-        return f"{title}-{case['preset']}" + ("-water" if case["solvent"] else "")
-    if case["kind"] == "frequencies":
-        return f"{title}-hessian"
-    if case["kind"] == "single_point":
-        return f"{title}-gfn0-sp"
-    raise AssertionError(f"unknown case kind {case['kind']!r}")
-
-
-def _expected_geometry(case: dict) -> str:
-    """:returns: The reference file the case's kind and identifier call for."""
-    title = case["title"]
-    if case["kind"] == "optimization":
-        return f"{title}/{case['id']}.xyz"
-    if case["kind"] == "frequencies":
-        # The Hessian is taken at xtb's own STANDARD optimized geometry, not at the input.
-        return f"{title}/{title}-standard.xyz"
-    if case["kind"] == "single_point":
-        return f"{title}/input.xyz"
-    raise AssertionError(f"unknown case kind {case['kind']!r}")
-
-
-def _charges(manifest: dict) -> dict[str, int]:
-    return {molecule["title"]: molecule["charge"] for molecule in manifest["molecules"]}
+def _required(case: dict) -> RequiredCase:
+    """:returns: The spec's entry for a case, failing the test when the case is not one."""
+    assert case["id"] in REQUIRED_CASES, (
+        f"{case['id']} is not a reference spec 12.3 asks for"
+    )
+    return REQUIRED_CASES[case["id"]]
 
 
 def test_the_manifest_records_the_pinned_xtb_and_a_tblite_version(manifest):
-    assert PINNED_XTB_VERSION in manifest["xtb_version"], manifest["xtb_version"]
+    """Exact, not a substring: ``6.7.1 in "6.7.10"`` is true and the releases are not the same."""
+    assert manifest["xtb_version"] == PINNED_XTB_VERSION
     tblite = manifest["tblite_version"]
     assert re.match(r"\d+\.\d+\.\d+ build \S+", tblite), tblite
 
@@ -214,6 +337,71 @@ def test_the_manifest_records_the_environment_its_references_came_from(manifest)
     but spec 12.3 asks for the settings, so the generator pins the thread count and records it.
     """
     assert manifest["xtb_environment"] == XTB_ENVIRONMENT
+
+
+def test_the_manifest_covers_exactly_the_molecules_spec_12_3_requires(manifest):
+    """Pinned, because the committed tree cannot notice a molecule that is simply gone."""
+    titles = [molecule["title"] for molecule in manifest["molecules"]]
+    assert titles == list(REQUIRED_MOLECULES)
+
+
+def test_every_molecule_records_the_charge_and_multiplicity_it_was_run_at(manifest):
+    """The charge the command lines are checked against comes from here, not from the manifest."""
+    for molecule in manifest["molecules"]:
+        required = REQUIRED_MOLECULES[molecule["title"]]
+        assert molecule["charge"] == required.charge, molecule["title"]
+        assert molecule["multiplicity"] == required.multiplicity, molecule["title"]
+        assert molecule["input"] == f"{molecule['title']}/input.xyz", molecule["title"]
+
+
+def test_the_manifest_covers_exactly_the_references_spec_12_3_requires(manifest):
+    """The whole required set, not just the ones the manifest happens to list.
+
+    A frequency or single-point case reuses a geometry that an optimization case already names,
+    so deleting one leaves every file still accounted for and every surviving entry still
+    self-consistent. Only an expectation written down outside the data notices it.
+    """
+    present = {case["id"] for case in manifest["cases"]}
+    missing = sorted(set(REQUIRED_CASES) - present)
+    extra = sorted(present - set(REQUIRED_CASES))
+    assert not missing, f"references spec 12.3 requires are missing: {missing}"
+    assert not extra, f"references the spec does not describe: {extra}"
+    assert len(manifest["cases"]) == len(REQUIRED_CASES), (
+        "a case identifier is duplicated"
+    )
+
+
+def test_the_references_of_each_kind_are_the_ones_spec_12_3_names(manifest):
+    """Counts and identities per kind, so a whole kind cannot thin out unnoticed."""
+    for kind in ("optimization", "frequencies", "single_point"):
+        present = {case["id"] for case in manifest["cases"] if case["kind"] == kind}
+        expected = {
+            identifier
+            for identifier, case in REQUIRED_CASES.items()
+            if case.kind == kind
+        }
+        assert present == expected, kind
+    counts = {kind: 0 for kind in ("optimization", "frequencies", "single_point")}
+    for case in manifest["cases"]:
+        counts[case["kind"]] += 1
+    assert counts == {"optimization": 37, "frequencies": 5, "single_point": 4}
+
+
+def test_every_case_records_the_settings_it_was_generated_under(manifest):
+    """Kind, preset, solvent and method must be the spec's, not whatever the manifest says.
+
+    Taking the solvent from the manifest and treating anything truthy as water is what let a
+    water reference be relabelled a methanol one with its command line changed to agree.
+    """
+    for case in manifest["cases"]:
+        required = _required(case)
+        assert case["title"] == required.title, case["id"]
+        assert case["kind"] == required.kind, case["id"]
+        if required.kind == "optimization":
+            assert case["preset"] == required.preset, case["id"]
+            assert case["solvent"] == required.solvent, case["id"]
+        if required.kind == "single_point":
+            assert case["method"] == required.method, case["id"]
 
 
 def test_the_manifest_names_every_committed_file_and_no_others(manifest):
@@ -247,21 +435,15 @@ def test_every_case_geometry_matches_its_recorded_hash(manifest):
         )
 
 
-def test_every_case_identifier_follows_the_settings_recorded_beside_it(manifest):
-    for case in manifest["cases"]:
-        assert case["id"] == _expected_identifier(case), case
-
-
 def test_every_case_names_the_geometry_file_its_kind_and_identifier_call_for(manifest):
     for case in manifest["cases"]:
-        assert case["geometry"] == _expected_geometry(case), case["id"]
+        assert case["geometry"] == _required(case).geometry, case["id"]
 
 
-def test_every_command_line_follows_the_settings_recorded_beside_it(manifest):
-    charges = _charges(manifest)
+def test_every_command_line_is_the_one_spec_12_3_s_settings_call_for(manifest):
+    """Rebuilt from the pinned settings, so the manifest cannot describe a run it did not make."""
     for case in manifest["cases"]:
-        expected = _expected_command(case, charges[case["title"]])
-        assert case["command"] == expected, case["id"]
+        assert case["command"] == _required(case).command, case["id"]
 
 
 def test_no_command_line_names_a_path_on_the_generating_machine(manifest):
@@ -288,7 +470,12 @@ def test_every_optimized_energy_is_the_energy_in_its_geometry_file(manifest):
         assert float(written.group(1)) == case["energy_hartree"], case["id"]
 
 
-def test_every_optimized_geometry_came_from_the_xtb_the_manifest_names(manifest):
+def test_every_optimized_geometry_came_from_the_pinned_xtb(manifest):
+    """Against the pinned release, not against whatever the manifest claims to have run.
+
+    A regeneration under an unsupported release stamps itself into every comment line, so the
+    stamps would agree with a manifest that named it. They are checked against the constant.
+    """
     for case in manifest["cases"]:
         if case["kind"] != "optimization":
             continue
@@ -297,9 +484,9 @@ def test_every_optimized_geometry_came_from_the_xtb_the_manifest_names(manifest)
         assert written is not None, (
             f"{case['geometry']} has no xtb stamp in its comment line"
         )
-        assert written.group(1) in manifest["xtb_version"], (
+        assert written.group(1) == PINNED_XTB_STAMP, (
             f"{case['geometry']} was written by xtb {written.group(1)}, "
-            f"but the manifest records {manifest['xtb_version']!r}"
+            f"but the references are pinned to {PINNED_XTB_STAMP}"
         )
 
 
@@ -324,22 +511,33 @@ def test_no_optimization_reference_was_run_under_a_constraint(manifest):
     the pointer are here so a consumer cannot RMSD a constrained result against an unconstrained
     reference and believe it checked something.
     """
-    constrained = {
-        molecule["title"]
-        for molecule in manifest["molecules"]
-        if molecule["constraints"]
-    }
-    assert constrained, "no molecule declares a constraint"
     for case in manifest["cases"]:
         if case["kind"] != "optimization":
             continue
         assert case["constrained"] is False, case["id"]
         expected = (
             f"molecules[{case['title']}].constraints"
-            if case["title"] in constrained
+            if case["title"] in CONSTRAINED_MOLECULES
             else None
         )
         assert case["constraint_reference"] == expected, case["id"]
+
+
+def test_the_constrained_molecules_declare_the_constraints_spec_12_3_requires(manifest):
+    """Pinned here, because the constraint references are the whole of the constrained coverage.
+
+    Discovering the constrained molecules from the manifest and asking only that one survives
+    lets a constraint be deleted with its case pointer nulled to match, which is the only way
+    spec 12.3's constrained clause is covered at all.
+    """
+    for molecule in manifest["molecules"]:
+        required = REQUIRED_MOLECULES[molecule["title"]].constraints
+        declared = tuple(
+            (constraint["kind"], tuple(constraint["atoms"]))
+            for constraint in molecule["constraints"]
+        )
+        assert declared == required, molecule["title"]
+    assert CONSTRAINED_MOLECULES, "the spec requires constrained cases"
 
 
 def test_every_constraint_value_measures_the_committed_input(manifest):
@@ -409,20 +607,17 @@ def test_every_single_point_energy_is_a_plausible_gfn0_energy(manifest):
 
 
 def test_the_subset_molecules_carry_all_three_presets_and_the_rest_carry_one(manifest):
-    presets: dict[str, set[str]] = {
-        molecule["title"]: set() for molecule in manifest["molecules"]
-    }
+    """Spec 12.3's preset rule, stated on its own rather than left implicit in the case set."""
+    presets: dict[str, set[str]] = {title: set() for title in REQUIRED_MOLECULES}
     for case in manifest["cases"]:
         if case["kind"] == "optimization" and case["solvent"] is None:
             presets[case["title"]].add(case["preset"])
+    subset = [
+        title for title, found in presets.items() if found == set(PRESET_ARGUMENTS)
+    ]
+    assert len(subset) == 5, subset
     for title, found in presets.items():
-        expected = set(PRESET_ARGUMENTS) if title in SUBSET else {"standard"}
-        assert found == expected, title
-
-
-def test_every_case_identifier_is_unique(manifest):
-    identifiers = [case["id"] for case in manifest["cases"]]
-    assert len(identifiers) == len(set(identifiers)), sorted(identifiers)
+        assert found == set(REQUIRED_MOLECULES[title].presets), title
 
 
 def test_the_manifest_holds_no_text_from_the_generating_machine(manifest):
