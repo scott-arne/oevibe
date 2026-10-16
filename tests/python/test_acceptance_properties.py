@@ -46,11 +46,19 @@ What each assertion can catch, measured on this reference set:
   compared against the wrong reference fails on length before it reaches the tolerance. What
   no frequency number can show is which geometry the Hessian was taken at, so
   ``test_the_hessian_is_taken_at_the_committed_xtb_geometry`` checks that separately.
-- Loosening a tolerance can never be caught by the comparisons it loosens, so the soft band's
-  shape is asserted on its own in
-  ``test_the_frequency_tolerance_never_loosens_a_mode_above_the_crossover``: of the 147 modes
-  compared, 143 are held to 2.000 cm^-1 exactly and the loosest comparison in the whole set is
-  5.576 cm^-1, at glycine's 62.77 cm^-1 mode.
+- Loosening a tolerance can never be caught by the comparisons it loosens, so the soft band is
+  asserted on its own, twice. ``test_the_frequency_tolerance_is_the_law_the_owner_approved``
+  pins ``2.0 x max(1, 175 / w)`` against a hand-worked table at wavenumbers this module
+  chooses, and ``test_the_frequency_tolerance_never_loosens_a_mode_above_the_crossover`` says
+  what that law does to the committed set: of the 147 modes compared, 143 are held to
+  2.000 cm^-1 exactly and the loosest comparison in the whole set is 5.576 cm^-1, at glycine's
+  62.77 cm^-1 mode.
+- Agreeing with a reference says nothing unless the run was made at the settings the reference
+  was made at, and that link used to be asserted about strings in the manifest rather than
+  about the run: at ``preset="fast"`` against the STANDARD references, every GFN0 comparison
+  and every GFN0 geometry discriminator stayed green. Each group now compares the method,
+  accuracy, solvent, charge and multiplicity OEVibe recorded in ``Provenance`` against the xtb
+  command line the manifest recorded for that reference.
 - The GFN0 agreement is 2e-11 to 4e-9 Eh against a 1e-6 Eh tolerance, which is tight enough to
   resolve the geometry it is pinned at: the same molecule's xtb-optimized STANDARD geometry is
   6.6e-4 to 4.4e-3 Eh away, and ``test_the_gfn0_tolerance_resolves_the_geometry_it_runs_at``
@@ -87,6 +95,35 @@ HARTREE_TO_KCAL = 627.5094740631
 # another accuracy would no longer be comparable with these runs, so the pairing is asserted.
 PRESET = "standard"
 PRESET_ACCURACY = "1.0"
+
+# The law spec 12.3 settles for the frequency comparison, written out here as the owner
+# approved it: tolerance(w) = 2.0 cm^-1 x max(1, 175 / w). Both constants are literals, and the
+# table below is worked out from them by hand, because a test that computes its expectation by
+# calling ``_frequency_tolerance`` pins no part of the law. Measured: a crossover of 150 cm^-1
+# carried consistently through the manifest, the generator and the integrity gate satisfies
+# every shape property the committed spectrum can express, and so does a band that simply
+# multiplies by 2.9 below the crossover.
+SETTLED_FLAT_CM1 = 2.0
+SETTLED_CROSSOVER_CM1 = 175.0
+
+# Representative wavenumbers and the cm^-1 the settled law allows at each. Chosen so that
+# 2.0 x 175 / w is an exact decimal, and so that both sides of the crossover and the stiff end
+# are covered. Deliberately NOT drawn from the committed references: the set holds no mode
+# between 143.98 and 198.96 cm^-1, and it is that gap a shape test reads when it accepts the
+# wrong crossover.
+SETTLED_TOLERANCE_CM1 = {
+    50.0: 7.0,
+    70.0: 5.0,
+    87.5: 4.0,
+    100.0: 3.5,
+    125.0: 2.8,
+    140.0: 2.5,
+    175.0: 2.0,
+    200.0: 2.0,
+    350.0: 2.0,
+    1750.0: 2.0,
+    3500.0: 2.0,
+}
 
 # Measured disagreements with spec 12.3, recorded as strict xfails rather than absorbed into a
 # tolerance: spec 12.3 sets the tolerances and names the molecule set, and both are the user's
@@ -129,6 +166,18 @@ MINIMUM_GEOMETRIES = {
     and case["solvent"] is None
 }
 
+# The gas-phase STANDARD optimization xtb ran for each molecule, keyed by title. The two
+# constrained molecules have one as well -- no xtb run holds a constraint, but it is still the
+# command line that records the Hamiltonian, accuracy, charge and solvent their references were
+# made at, which is what the constrained runs here have to match.
+STANDARD_COMMANDS = {
+    case["title"]: case["command"]
+    for case in _CASES
+    if case["kind"] == "optimization"
+    and case["preset"] == PRESET
+    and case["solvent"] is None
+}
+
 MISSING_FREQUENCY = "the-committed-manifest-lists-no-frequency-reference"
 MISSING_SINGLE_POINT = "the-committed-manifest-lists-no-gfn0-single-point-reference"
 MISSING_CONSTRAINED = "the-committed-manifest-lists-no-constrained-molecule"
@@ -153,6 +202,65 @@ def _present(identifier: str, cases: dict, what: str) -> dict:
         "scripts/acceptance/generate_references.py"
     )
     return cases[identifier]
+
+
+def _settings_from_command(command: list[str]) -> dict[str, str]:
+    """The settings a reference's own xtb command line calls for.
+
+    xtb's argv is committed data recorded when the reference was generated, so it is an oracle
+    this module cannot influence. Comparing a run's provenance against it is what makes the
+    agreements below statements about OEVibe running the settings the references were made at,
+    rather than about a keyword argument written next to the call.
+
+    ``--acc`` is the one that distinguishes the three presets: ``scripts/acceptance/molecules.py``
+    maps FAST, STANDARD and THOROUGH to 2.0, 1.0 and 0.2, so an accuracy that matches pins the
+    preset too.
+
+    :param command: The manifest's recorded argv for one case.
+    :returns: The provenance keys the command line states, in the spelling OEVibe records.
+    :raises AssertionError: When the command omits a setting that has to be compared, so a
+        reference whose command stopped recording one fails rather than comparing nothing.
+    """
+    values = {
+        token: command[index + 1]
+        for index, token in enumerate(command)
+        if token.startswith("--") and index + 1 < len(command)
+    }
+    for flag in ("--gfn", "--acc", "--chrg", "--uhf"):
+        assert flag in values, (
+            f"{command} records no {flag}, so a run cannot be checked by it"
+        )
+    solvents = [flag for flag in ("--alpb", "--gbsa") if flag in values]
+    assert len(solvents) <= 1, f"{command} names more than one solvent model"
+    return {
+        "method": f"gfn{values['--gfn']}-xtb",
+        # Normalized so that xtb's "1.0" and OEVibe's "1.000000" are the same number.
+        "accuracy": f"{float(values['--acc']):g}",
+        # Solvent::GetTag's spelling: "gas", or the model name and the solvent name.
+        "solvent": (f"{solvents[0][2:]}-{values[solvents[0]]}" if solvents else "gas"),
+        "charge": values["--chrg"],
+        # xtb counts unpaired electrons; OEVibe records the multiplicity they imply.
+        "multiplicity": str(int(values["--uhf"]) + 1),
+    }
+
+
+def _executed_settings(resolved: dict[str, str]) -> dict[str, str]:
+    """:returns: The part of a result's recorded provenance an xtb command line also states.
+
+    :param resolved: ``GetProvenance().GetResolvedOptions()`` from the run being checked.
+    """
+    return {
+        "method": resolved["method"],
+        "accuracy": f"{float(resolved['accuracy']):g}",
+        "solvent": resolved["solvent"],
+        "charge": resolved["charge"],
+        "multiplicity": resolved["multiplicity"],
+    }
+
+
+def _provenance_of(result) -> dict[str, str]:
+    """:returns: One result's resolved options as a plain dict, for the frozen records below."""
+    return dict(result.GetProvenance().GetResolvedOptions())
 
 
 def _coordinates_of(mol) -> np.ndarray:
@@ -272,6 +380,7 @@ class Spectrum:
     mine: tuple[float, ...]  # cm^-1, 3N-6 ascending, rigid-body modes projected out
     theirs: tuple[float, ...]  # cm^-1, the manifest's 3N values past the first six
     moved: float  # Angstrom, the furthest any atom travelled during the run
+    resolved: dict[str, str]  # the settings OEVibe recorded for the run
 
 
 @functools.cache
@@ -300,9 +409,16 @@ def _spectrum(identifier: str) -> Spectrum:
     # Hessian was taken, and oevibe.frequencies writes an optimized geometry back.
     moved = float(np.linalg.norm(_coordinates_of(mol) - before, axis=1).max())
     reference = tuple(float(value) for value in case["wavenumbers_cm1"][6:])
+    resolved = _provenance_of(result)
     if result.GetStatus() != oevibe.ConformerStatus.OK:
         return Spectrum(
-            result.GetStatus(), result.GetMessage(), atoms, (), reference, moved
+            result.GetStatus(),
+            result.GetMessage(),
+            atoms,
+            (),
+            reference,
+            moved,
+            resolved,
         )
     return Spectrum(
         result.GetStatus(),
@@ -311,6 +427,7 @@ def _spectrum(identifier: str) -> Spectrum:
         tuple(float(value) for value in result.GetFrequencies()),
         reference,
         moved,
+        resolved,
     )
 
 
@@ -345,6 +462,7 @@ class SinglePoint:
     hartree: float  # at the geometry the reference was taken at
     reference: float
     at_the_minimum: float  # the same method at the molecule's xtb STANDARD geometry
+    resolved: dict[str, str]  # the settings OEVibe recorded for the run
 
 
 @functools.cache
@@ -371,6 +489,7 @@ def _single_point(identifier: str) -> SinglePoint:
     result = oevibe.energy(
         mol, method="gfn0-xtb", preset=PRESET, charge=molecule["charge"]
     ).Get(0)
+    resolved = _provenance_of(result)
     if result.GetStatus() != oevibe.ConformerStatus.OK:
         return SinglePoint(
             result.GetStatus(),
@@ -378,6 +497,7 @@ def _single_point(identifier: str) -> SinglePoint:
             float("nan"),
             case["energy_hartree"],
             float("nan"),
+            resolved,
         )
     minimum = MINIMUM_GEOMETRIES.get(case["title"])
     return SinglePoint(
@@ -386,6 +506,7 @@ def _single_point(identifier: str) -> SinglePoint:
         result.GetEnergy() / HARTREE_TO_KCAL,
         case["energy_hartree"],
         energy(minimum) if minimum else float("nan"),
+        resolved,
     )
 
 
@@ -401,6 +522,8 @@ class ConstrainedRun:
     held: np.ndarray  # the constrained optimization's coordinates
     free: np.ndarray  # the same input optimized with no constraints at all
     free_converged: bool
+    resolved: dict[str, str]  # the settings OEVibe recorded for the constrained run
+    free_resolved: dict[str, str]  # and for the unconstrained witness
 
 
 @functools.cache
@@ -466,6 +589,8 @@ def _constrained_run(title: str) -> ConstrainedRun:
             free.GetStatus() == oevibe.ConformerStatus.OK
             and bool(free.GetOptimizationStats().converged)
         ),
+        resolved=_provenance_of(held),
+        free_resolved=_provenance_of(free),
     )
 
 
@@ -500,6 +625,79 @@ def test_every_reference_was_generated_at_the_settings_this_module_reruns(
         checked += 1
     assert checked == len(FREQUENCY_CASES) + len(SINGLE_POINT_CASES)
     assert checked, "the manifest holds no reference for this module to check"
+
+
+@pytest.mark.usefixtures("tblite_library")
+@pytest.mark.parametrize("identifier", _parameters(FREQUENCY_CASES, MISSING_FREQUENCY))
+def test_the_frequency_run_used_the_settings_its_reference_was_generated_at(identifier):
+    """What OEVibe recorded it ran, against what xtb's own command line says.
+
+    The guard above checks the committed data against this module's constants; it never looks
+    at the run. That gap was measured: running this module's GFN0 calls at ``preset="fast"``
+    against the STANDARD references left all four value comparisons and all four geometry
+    discriminators green, because a single point at a slightly different accuracy is still a
+    single point at the right geometry. A localized preset regression was therefore invisible
+    to a suite whose whole purpose is to show the library produced these numbers under the
+    settings the references were made with.
+
+    Closed by reading ``Provenance::resolved_options`` -- the method, accuracy, solvent, charge
+    and multiplicity OEVibe says the engine received -- and comparing it with the manifest's
+    recorded argv. Neither side is a constant written next to the call.
+    """
+    case = _present(identifier, FREQUENCY_CASES, "frequency reference")
+    spectrum = _spectrum(identifier)
+    assert spectrum.status == oevibe.ConformerStatus.OK, spectrum.message
+    expected = _settings_from_command(case["command"])
+    assert _executed_settings(spectrum.resolved) == expected, (
+        f"{identifier}: OEVibe recorded {_executed_settings(spectrum.resolved)} for the run "
+        f"this comparison uses, and the reference was generated by {' '.join(case['command'])}"
+    )
+
+
+@pytest.mark.usefixtures("xtb_library")
+@pytest.mark.parametrize(
+    "identifier", _parameters(SINGLE_POINT_CASES, MISSING_SINGLE_POINT)
+)
+def test_the_gfn0_run_used_the_settings_its_reference_was_generated_at(identifier):
+    """The same check for the GFN0 single points, which is where the gap was measured."""
+    case = _present(identifier, SINGLE_POINT_CASES, "GFN0 single-point reference")
+    single_point = _single_point(identifier)
+    assert single_point.status == oevibe.ConformerStatus.OK, single_point.message
+    expected = _settings_from_command(case["command"])
+    assert _executed_settings(single_point.resolved) == expected, (
+        f"{identifier}: OEVibe recorded {_executed_settings(single_point.resolved)} for the "
+        f"run this comparison uses, and the reference was generated by "
+        f"{' '.join(case['command'])}"
+    )
+
+
+@pytest.mark.usefixtures("tblite_library")
+@pytest.mark.parametrize("title", _parameters(CONSTRAINED, MISSING_CONSTRAINED))
+def test_the_constrained_runs_used_the_settings_the_references_were_generated_at(title):
+    """Both runs of each constrained molecule, against its recorded xtb command line.
+
+    No xtb run holds a constraint, so the constrained molecules have no reference values to
+    compare -- but they do have a recorded command, and the unconstrained witness only shows
+    what the constraints hold against if it ran at the same Hamiltonian and accuracy as the
+    constrained run it is the witness for. Both are checked for that reason.
+    """
+    _present(title, CONSTRAINED, "constrained molecule")
+    run = _constrained_run(title)
+    assert run.status == oevibe.ConformerStatus.OK, run.message
+    assert title in STANDARD_COMMANDS, (
+        f"{title}: the manifest records no gas-phase {PRESET} optimization, so there is no "
+        "command line stating the settings these runs are supposed to use"
+    )
+    command = STANDARD_COMMANDS[title]
+    expected = _settings_from_command(command)
+    assert _executed_settings(run.resolved) == expected, (
+        f"{title}: OEVibe recorded {_executed_settings(run.resolved)} for the constrained "
+        f"run, against {' '.join(command)}"
+    )
+    assert _executed_settings(run.free_resolved) == expected, (
+        f"{title}: OEVibe recorded {_executed_settings(run.free_resolved)} for the "
+        f"unconstrained witness, against {' '.join(command)}"
+    )
 
 
 # --- Frequencies (spec 12.3) ------------------------------------------------------------
@@ -540,14 +738,25 @@ def test_the_hessian_is_taken_at_the_committed_xtb_geometry(identifier):
     asking for the optimization first changes nothing here, because OEVibe's optimizer accepts
     all five committed geometries without an accepted step. So the tolerance test would go on
     passing if a later change made the frequency verb relax its input, and the agreement would
-    quietly become a statement about two different structures. ``optimize=False`` is checked
-    here for what it does -- leave the molecule's coordinates alone -- rather than trusted
-    because it is written in the call. Measured: the same call from a geometry that is not a
-    minimum (imidazole's OMEGA input) moves an atom 2.8e-2 Angstrom, which this rejects.
+    quietly become a statement about two different structures.
+
+    Two assertions, because neither covers the other. The run has to record that it was asked
+    for a bare Hessian (``thermo.optimize_first``, which ``Calculation::Frequencies`` writes
+    into provenance from the same flag it branches on), and it has to have left the molecule's
+    coordinates where it found them. The first is what tells ``optimize=False`` from
+    ``optimize=True`` on data where no geometry moves either way; the second is what catches a
+    run that relaxed its input regardless of the flag. Measured: with the flag assertion alone,
+    the same call from a geometry that is not a minimum (imidazole's OMEGA input) would pass
+    while moving an atom 2.8e-2 Angstrom, which the coordinate assertion rejects.
     """
     _present(identifier, FREQUENCY_CASES, "frequency reference")
     spectrum = _spectrum(identifier)
     assert spectrum.status == oevibe.ConformerStatus.OK, spectrum.message
+    assert spectrum.resolved["thermo.optimize_first"] == "false", (
+        f"{identifier}: the run recorded thermo.optimize_first="
+        f"{spectrum.resolved['thermo.optimize_first']!r}, so it relaxed the geometry first "
+        "and the Hessian is not the one xtb took at the committed structure"
+    )
     assert spectrum.moved == 0.0, (
         f"{identifier}: the frequency run moved an atom {spectrum.moved:.3e} Angstrom, so "
         "the Hessian was not taken at the committed geometry xtb took its own at"
@@ -661,6 +870,45 @@ def test_some_frequency_reference_has_an_imaginary_mode_below_the_floor(
     )
 
 
+def test_the_frequency_tolerance_is_the_law_the_owner_approved(acceptance_manifest):
+    """``tolerance(w) = 2.0 cm^-1 x max(1, 175 / w)``, at wavenumbers of this test's choosing.
+
+    The shape test below says what the band does to the committed spectrum, and that is not
+    the same as saying what the law is. Two measured counterexamples, both of which satisfied
+    every shape property before this test existed:
+
+    - a crossover of 150 cm^-1, carried consistently through the manifest, the generator and
+      ``test_acceptance_manifest.py``'s tolerance gate. The committed set jumps from 143.98 to
+      198.96 cm^-1 with nothing in between, so no committed mode can tell 150 from 175.
+    - a band returning ``2.9 x flat`` below the crossover and ``flat`` above. It is monotone,
+      meets the flat value at the crossover and stays under the 3x cap, while allowing
+      5.8 cm^-1 at glycine's 143.98 cm^-1 mode where the settled law gives 2.431.
+
+    So the law is asserted directly: the two constants against the manifest, and the allowed
+    cm^-1 at eleven wavenumbers against a table worked out from the constants by hand rather
+    than by calling ``_frequency_tolerance``. The wavenumbers are chosen for where a wrong law
+    shows -- through the band, at the crossover, and out to 3500 cm^-1 -- and not for where
+    the reference set happens to have modes, which is what let the gap at 175 cm^-1 hide.
+    """
+    tolerances = acceptance_manifest["tolerances"]
+    assert tolerances["frequency_cm1"] == SETTLED_FLAT_CM1, (
+        f"spec 12.3's flat tolerance is {SETTLED_FLAT_CM1} cm^-1 and the manifest records "
+        f"{tolerances['frequency_cm1']}"
+    )
+    assert tolerances["frequency_soft_crossover_cm1"] == SETTLED_CROSSOVER_CM1, (
+        f"spec 12.3's soft crossover is {SETTLED_CROSSOVER_CM1} cm^-1 and the manifest "
+        f"records {tolerances['frequency_soft_crossover_cm1']}; the crossover was chosen from "
+        "the gap between the softest mode that shows amplification (143.98 cm^-1) and the "
+        "stiffest that does not (198.96 cm^-1), so moving it is a change to the settled law"
+    )
+    for wavenumber, allowed in SETTLED_TOLERANCE_CM1.items():
+        measured = _frequency_tolerance(wavenumber, tolerances)
+        assert measured == pytest.approx(allowed), (
+            f"at {wavenumber} cm^-1 the settled law allows {allowed} cm^-1 and this suite "
+            f"allows {measured:.4f} cm^-1"
+        )
+
+
 def test_the_frequency_tolerance_never_loosens_a_mode_above_the_crossover(
     acceptance_manifest,
 ):
@@ -673,6 +921,11 @@ def test_the_frequency_tolerance_never_loosens_a_mode_above_the_crossover(
     ever makes them pass. So the shape is asserted here instead, on the committed reference
     wavenumbers rather than on anything a run produces, and this test is the one that fails
     when the widening reaches the stiff end of the spectrum.
+
+    The law itself is pinned by ``test_the_frequency_tolerance_is_the_law_the_owner_approved``
+    and is not inferred here. What this test adds is what the law does to the set that is
+    actually committed, including the cap below, which is the assertion a new reference softer
+    than anything here has to be weighed against rather than quietly widened past.
 
     Measured over the 147 modes above the floor: 143 of them are held to 2.000 cm^-1 exactly,
     the stiffest (urea's 3584.61 cm^-1) among them, and the loosest comparison anywhere is
