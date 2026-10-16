@@ -16,7 +16,9 @@ and its final energy is below the reference by MORE than the energy tolerance. W
 tolerance is the same basin, where both criteria are meaningful and stay enforced, and a case
 nobody listed keeps both criteria whatever its energy does. A waived case still has to converge
 and still has to meet the energy criterion itself. The comment on ``BETTER_MINIMUM_CASES``
-records why the pin is load-bearing rather than bookkeeping.
+records why the pin is load-bearing rather than bookkeeping, and both of those conditions are
+pinned by a test that works out what should happen from the manifest and the list instead of
+asking the waiver helper, so dropping either one from the helper fails the suite.
 
 Run with ``pytest -m acceptance``. The suite needs ``OEVIBE_TBLITE_LIBRARY``; nothing here runs
 xtb, it only consumes the geometries xtb 6.7.1 produced.
@@ -46,6 +48,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import sys
 
 import pytest
 from conftest import ACCEPTANCE_DIR, read_xyz_molecule
@@ -281,7 +284,81 @@ def test_the_pinned_better_minimum_case_still_leaves_the_reference_basin(
     never exercised again, so it would sit in the set granting nothing and nobody would know.
     """
     _case(identifier)
+    tolerance = acceptance_manifest["tolerances"]["energy_kcal_per_mol"]
+    difference = _agreement(identifier).energy_difference
+    # Read off the measurement and the manifest rather than off the helper, so this fails both
+    # when the case climbs back into the reference basin and when the helper stops checking.
+    assert difference < -tolerance, (
+        f"{identifier} is pinned as a better minimum but finished {difference:+.4f} kcal/mol "
+        f"against tblite at the xtb geometry, not more than {tolerance} kcal/mol below it"
+    )
     assert _takes_the_better_minimum_waiver(identifier, acceptance_manifest)
+
+
+def test_a_case_outside_the_pinned_list_never_takes_the_waiver(acceptance_manifest):
+    """Membership of ``BETTER_MINIMUM_CASES`` is necessary, not a cross-check on the energy.
+
+    What should happen is derived from the pinned list and the measured energies, never from
+    the helper: a case nobody listed keeps its RMSD and step-count criteria however far below
+    the reference it finishes. The subset that finishes more than the energy tolerance below
+    is asserted non-empty first, because that subset is the only place the pinned rule and an
+    energy-only one disagree -- without it this test would pass on data that cannot tell them
+    apart, and today it is five cases carrying ten live checks between them.
+    """
+    tolerance = acceptance_manifest["tolerances"]["energy_kcal_per_mol"]
+    unlisted = sorted(set(CASES) - BETTER_MINIMUM_CASES)
+    below = {
+        identifier: _agreement(identifier).energy_difference
+        for identifier in unlisted
+        if _agreement(identifier).energy_difference < -tolerance
+    }
+    assert below, (
+        f"no unlisted reference finishes more than {tolerance} kcal/mol below tblite at the "
+        "xtb geometry any more, so this test can no longer tell the pinned waiver from an "
+        "energy-only one; re-measure the distribution recorded on BETTER_MINIMUM_CASES"
+    )
+    waived = [
+        identifier
+        for identifier in unlisted
+        if _takes_the_better_minimum_waiver(identifier, acceptance_manifest)
+    ]
+    assert not waived, (
+        f"{', '.join(waived)} took the better-minimum waiver without being pinned, so their "
+        "RMSD and step-count criteria are no longer enforced. Finishing below the reference is "
+        "not by itself a different basin: of the cases that do, "
+        f"{', '.join(f'{k} {v:+.4f} kcal/mol' for k, v in sorted(below.items()))} are the "
+        "reference minimum converged a shade tighter and still pass both waived criteria."
+    )
+
+
+def test_a_pinned_case_inside_the_energy_tolerance_does_not_take_the_waiver(
+    acceptance_manifest, monkeypatch
+):
+    """The energy condition is necessary too: being pinned does not on its own grant a waiver.
+
+    No committed reference is both pinned and inside the energy tolerance, so the pin is moved
+    onto a case the measurements show IS inside it -- real data on the side being tested, and a
+    test-owned constant on the other. The helper has to refuse, and it refuses loudly rather
+    than quietly, because a pinned case back in the reference basin is a stale entry.
+    """
+    tolerance = acceptance_manifest["tolerances"]["energy_kcal_per_mol"]
+    # The case sitting closest to the reference energy, so the witness is unambiguously inside
+    # the basin the waiver must not be handed out in. A NaN margin compares false and drops out.
+    inside = sorted(
+        (abs(_agreement(identifier).energy_difference), identifier)
+        for identifier in CASES
+        if abs(_agreement(identifier).energy_difference) <= tolerance
+    )
+    assert inside, (
+        f"no reference finishes within {tolerance} kcal/mol of tblite at the xtb geometry, so "
+        "there is no case left to move the pin onto; this boundary needs a different witness"
+    )
+    identifier = inside[0][1]
+    monkeypatch.setattr(
+        sys.modules[__name__], "BETTER_MINIMUM_CASES", frozenset({identifier})
+    )
+    with pytest.raises(AssertionError, match="no longer earns the waiver"):
+        _takes_the_better_minimum_waiver(identifier, acceptance_manifest)
 
 
 @pytest.mark.parametrize("identifier", _parameters("rmsd"))
