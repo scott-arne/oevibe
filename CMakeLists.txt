@@ -32,7 +32,7 @@ include(FetchContent)
 FetchContent_Declare(
     cmake_openeye
     GIT_REPOSITORY https://github.com/scott-arne/cmake-openeye.git
-    GIT_TAG v1.2.1
+    GIT_TAG v1.3.0
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(cmake_openeye)
@@ -93,6 +93,25 @@ if(OEVIBE_BUILD_PYTHON)
             "openeye-toolkits wheel, but OPENEYE_USE_SHARED resolved to ${OPENEYE_USE_SHARED} "
             "and OpenEye::OEChem links ${_OEVIBE_OECHEM_LOCATION}. "
             "Configure with the python preset.")
+    endif()
+    # The check above is sufficient on POSIX, where the resolved .dylib/.so is itself the link
+    # input. A Windows DLL is not: it is bound through a separate import library, which the
+    # openeye-toolkits wheel does not ship and cmake-openeye therefore generates from the DLL's
+    # export table. Its absence means the extension would link nothing of OpenEye at all.
+    if(WIN32)
+        get_target_property(_OEVIBE_OECHEM_IMPLIB OpenEye::OEChem IMPORTED_IMPLIB)
+        if(NOT _OEVIBE_OECHEM_IMPLIB AND CMAKE_BUILD_TYPE)
+            string(TOUPPER "${CMAKE_BUILD_TYPE}" _OEVIBE_CONFIG)
+            get_target_property(_OEVIBE_OECHEM_IMPLIB OpenEye::OEChem
+                IMPORTED_IMPLIB_${_OEVIBE_CONFIG})
+        endif()
+        if(NOT _OEVIBE_OECHEM_IMPLIB)
+            message(FATAL_ERROR "OEVIBE_BUILD_PYTHON resolved OpenEye::OEChem to "
+                "${_OEVIBE_OECHEM_LOCATION}, but the target carries no IMPORTED_IMPLIB, so the "
+                "linker has nothing to bind the extension's OpenEye imports to. cmake-openeye "
+                "builds one import library per wheel DLL and needs dumpbin and lib on PATH to "
+                "do it; configure from a Visual Studio developer environment.")
+        endif()
     endif()
     set(OpenEye_LIBRARY_TYPE SHARED)
 endif()

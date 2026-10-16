@@ -20,6 +20,9 @@ __version_info__ = (0, 1, 0)
 
 _OPENEYE_COMPAT_PRELOAD_PATHS: list[str] = []
 _OPENEYE_COMPAT_EXTENSION_DIR: Path | None = None
+# Windows DLL search-path registrations. Held for the life of the process because
+# dropping a handle unregisters the directory again.
+_OPENEYE_DLL_DIRECTORIES: list = []
 
 
 def _user_cache_root():
@@ -415,6 +418,47 @@ def _load_cached_extension_if_needed():
         raise
 
 
+def _add_openeye_dll_directory():
+    """Put the openeye-toolkits DLL directory on the Windows search path.
+
+    Windows resolves an extension module's dependent DLLs from the directories
+    registered with ``os.add_dll_directory``, plus the directory holding the
+    ``.pyd`` itself, which CPython adds because it loads extensions with
+    ``LOAD_WITH_ALTERED_SEARCH_PATH``. The ``openeye-toolkits`` wheel registers
+    nothing: its ``openeye/libs/__init__.py`` is the same file on every platform
+    and calls ``os.add_dll_directory`` nowhere. OpenEye's own extension modules
+    resolve the toolkit DLLs only because they live in ``openeye/libs`` beside
+    them. ``_oevibe.pyd`` lives in ``oevibe/``, so it needs the directory
+    registered here, before anything imports the extension.
+
+    A failure is swallowed rather than raised: the import of ``_oevibe`` that
+    follows reports a missing dependency far more usefully than an ``OSError``
+    naming only the directory.
+    """
+    if sys.platform != "win32":
+        return
+
+    try:
+        from . import _build_info
+    except ImportError:
+        return
+
+    if getattr(_build_info, "OPENEYE_LIBRARY_TYPE", "STATIC") != "SHARED":
+        return
+
+    expected_libs = _runtime_shared_library_names(
+        getattr(_build_info, "OPENEYE_EXPECTED_LIBS", [])
+    )
+    oe_lib_dir = _find_openeye_runtime_lib_dir(expected_libs)
+    if oe_lib_dir is None or not os.path.isdir(oe_lib_dir):
+        return
+
+    try:
+        _OPENEYE_DLL_DIRECTORIES.append(os.add_dll_directory(oe_lib_dir))
+    except OSError:
+        pass
+
+
 def _preload_shared_libs():
     """Preload OpenEye shared libraries so the C extension can find them.
 
@@ -554,6 +598,7 @@ def _check_openeye_version():
         )
 
 
+_add_openeye_dll_directory()
 _ensure_library_compat()
 _preload_shared_libs()
 _preload_bundled_libs()
