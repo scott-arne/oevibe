@@ -1638,6 +1638,7 @@
     "energy_kcal_per_mol": 0.01,
     "frequency_cm1": 2.0,
     "frequency_floor_cm1": 50.0,
+    "frequency_soft_crossover_cm1": 175.0,
     "heavy_atom_rmsd_angstrom": 0.05,
     "single_point_hartree": 1e-06,
     "step_ratio": 1.3

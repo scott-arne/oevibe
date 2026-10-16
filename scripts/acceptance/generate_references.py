@@ -60,12 +60,19 @@ PINNED_XTB_VERSION = "6.7.1"
 
 # Spec 12.3 bounds the RMSD over heavy atoms; the name carries the qualifier so that a consumer
 # cannot compute an all-atom RMSD against it.
+#
+# frequency_soft_crossover_cm1 is where spec 12.3's frequency tolerance stops being flat: below
+# it the 2 cm^-1 is multiplied by crossover/wavenumber, because a wavenumber is the square root
+# of a Hessian eigenvalue and the same eigenvalue difference moves a soft mode in inverse
+# proportion to its wavenumber. Above it the tolerance is 2 cm^-1 exactly, so no stiff mode is
+# ever compared more loosely than the flat value.
 TOLERANCES = {
     "heavy_atom_rmsd_angstrom": 0.05,
     "energy_kcal_per_mol": 0.01,
     "step_ratio": 1.3,
     "frequency_cm1": 2.0,
     "frequency_floor_cm1": 50.0,
+    "frequency_soft_crossover_cm1": 175.0,
     "constraint_angstrom": 1e-4,
     "constraint_degrees": 1e-3,
     "single_point_hartree": 1e-6,

@@ -60,12 +60,15 @@ MACHINE_TEXT = re.compile(r"(/Users/|/home/|[A-Za-z]:\\\\|\S+@\S+|\.local\b)")
 
 # Spec 12.3's tolerances under names that carry the qualifier the spec attaches to them: the RMSD
 # the spec bounds is over heavy atoms, and a bare "rmsd" invites an all-atom comparison instead.
+# frequency_soft_crossover_cm1 is the wavenumber below which spec 12.3 widens the flat 2 cm^-1 by
+# crossover/wavenumber; above it the tolerance is the flat value.
 SPEC_TOLERANCES = {
     "heavy_atom_rmsd_angstrom": 0.05,
     "energy_kcal_per_mol": 0.01,
     "step_ratio": 1.3,
     "frequency_cm1": 2.0,
     "frequency_floor_cm1": 50.0,
+    "frequency_soft_crossover_cm1": 175.0,
     "constraint_angstrom": 1e-4,
     "constraint_degrees": 1e-3,
     "single_point_hartree": 1e-6,

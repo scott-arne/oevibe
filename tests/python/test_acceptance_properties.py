@@ -5,7 +5,11 @@ The three criteria spec 12.3 states after the optimization one, which
 
 - "Finite-difference frequencies match ``xtb --hess`` within the tolerance set from spike S5's
   measured tblite/xtb agreement (target 2 cm^-1 for modes above 50 cm^-1), recorded in the
-  manifest."
+  manifest, widened to 2 cm^-1 x (175 / wavenumber) for modes below 175 cm^-1 because a
+  wavenumber is the square root of a Hessian eigenvalue, so the same eigenvalue difference
+  moves a soft mode in inverse proportion to its wavenumber. The 50 cm^-1 floor is signed:
+  imaginary modes are below it, so they are excluded from the value comparison and their count
+  is checked instead."
 - "Constrained optimizations hold every constraint within 1e-4 Angstrom or 1e-3 degrees."
 - "GFN0-xTB single points ... through ``XtbEngine`` match ``xtb --sp`` within 1e-6 Eh, since
   they share the same library."
@@ -42,6 +46,11 @@ What each assertion can catch, measured on this reference set:
   compared against the wrong reference fails on length before it reaches the tolerance. What
   no frequency number can show is which geometry the Hessian was taken at, so
   ``test_the_hessian_is_taken_at_the_committed_xtb_geometry`` checks that separately.
+- Loosening a tolerance can never be caught by the comparisons it loosens, so the soft band's
+  shape is asserted on its own in
+  ``test_the_frequency_tolerance_never_loosens_a_mode_above_the_crossover``: of the 147 modes
+  compared, 143 are held to 2.000 cm^-1 exactly and the loosest comparison in the whole set is
+  5.576 cm^-1, at glycine's 62.77 cm^-1 mode.
 - The GFN0 agreement is 2e-11 to 4e-9 Eh against a 1e-6 Eh tolerance, which is tight enough to
   resolve the geometry it is pinned at: the same molecule's xtb-optimized STANDARD geometry is
   6.6e-4 to 4.4e-3 Eh away, and ``test_the_gfn0_tolerance_resolves_the_geometry_it_runs_at``
@@ -81,15 +90,10 @@ PRESET_ACCURACY = "1.0"
 
 # Measured disagreements with spec 12.3, recorded as strict xfails rather than absorbed into a
 # tolerance: spec 12.3 sets the tolerances and names the molecule set, and both are the user's
-# to change. The numbers are from the run that first measured them.
-KNOWN_DIVERGENCES: dict[tuple[str, str], str] = {
-    ("glycine-hessian", "above the floor"): (
-        "62.77 cm^-1, the lowest reference mode above the 50 cm^-1 floor anywhere in the set, "
-        "comes back at 64.90 cm^-1: 2.132 cm^-1 against the 2.0 cm^-1 tolerance. The next "
-        "worst mode in the whole set is 0.833 cm^-1 out, so this is the floor sitting low "
-        "enough to admit a soft mode, not a broken comparison."
-    ),
-}
+# to change. The numbers are from the run that first measured them. Empty today: glycine's
+# 62.77 cm^-1 mode was the one entry, and spec 12.3's soft band now covers it, so the case is
+# compared rather than waived.
+KNOWN_DIVERGENCES: dict[tuple[str, str], str] = {}
 
 
 def _manifest() -> dict:
@@ -308,6 +312,28 @@ def _spectrum(identifier: str) -> Spectrum:
         reference,
         moved,
     )
+
+
+def _frequency_tolerance(reference: float, tolerances: dict) -> float:
+    """:returns: The cm^-1 spec 12.3 allows between the two codes at one mode.
+
+    Flat above ``frequency_soft_crossover_cm1`` and widened by ``crossover / reference`` below
+    it. The widening is the square-root law rather than a curve fitted to this set: a
+    wavenumber is the square root of a Hessian eigenvalue, so two codes that differ by a fixed
+    amount in the eigenvalue differ in the wavenumber by an amount inversely proportional to
+    it, and the disagreement grows without the Hessians having grown further apart. A relative
+    term pointing the other way -- looser as the wavenumber rises -- is the shape this must not
+    have, since at 4% it would allow 60 cm^-1 at a 1500 cm^-1 mode;
+    ``test_the_frequency_tolerance_never_loosens_a_mode_above_the_crossover`` rejects it.
+
+    :param reference: xtb's wavenumber for the mode, cm^-1. Which modes are compared is decided
+        by xtb's values alone, so how closely is decided there too; using OEVibe's own value
+        would let a mode that came back soft award itself a wider tolerance.
+    :param tolerances: The manifest's tolerance block.
+    """
+    flat = tolerances["frequency_cm1"]
+    crossover = tolerances["frequency_soft_crossover_cm1"]
+    return flat * max(1.0, crossover / reference)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -533,7 +559,7 @@ def test_the_hessian_is_taken_at_the_committed_xtb_geometry(identifier):
     "identifier", _parameters(FREQUENCY_CASES, MISSING_FREQUENCY, "above the floor")
 )
 def test_the_modes_above_the_floor_match_xtb_hess(identifier, acceptance_manifest):
-    """Spec 12.3: within the manifest's 2 cm^-1 for modes above its 50 cm^-1 floor.
+    """Spec 12.3: within the manifest's 2 cm^-1, widened below its soft crossover.
 
     Which modes are compared is decided by xtb's values alone. Selecting on OEVibe's own
     frequencies would let a mode that came back wrong drop itself out of the comparison, and
@@ -541,6 +567,14 @@ def test_the_modes_above_the_floor_match_xtb_hess(identifier, acceptance_manifes
     keep out -- spec 12.3 says "modes above 50 cm^-1", and -113 cm^-1 is not above 50. That
     second reading is not academic: measured, it fails urea on its -113.65 cm^-1 mode by
     3.39 cm^-1, which is the only thing either reading changes on this reference set.
+
+    Each mode is held to ``_frequency_tolerance`` at its own wavenumber, and the mode reported
+    is the one closest to its own limit rather than the one furthest out in absolute cm^-1.
+    Measured, worst case per reference, as a fraction of what that mode is allowed: 0.780 for
+    glycine (143.98 cm^-1, 1.896 of 2.431), 0.416 for salicylamide, 0.368 for anisole, 0.347
+    for imidazole, 0.338 for urea. Glycine's 62.77 cm^-1 mode, the one the band was added for,
+    comes in at 0.382 -- 2.132 cm^-1 of the 5.576 cm^-1 allowed there -- so the tightest margin
+    left in the set is its 143.98 cm^-1 neighbour, which the band also widens.
     """
     _present(identifier, FREQUENCY_CASES, "frequency reference")
     spectrum = _spectrum(identifier)
@@ -552,15 +586,21 @@ def test_the_modes_above_the_floor_match_xtb_hess(identifier, acceptance_manifes
         "no mode can be paired with its reference"
     )
     pairs = [
-        (abs(mine - theirs), mine, theirs)
+        (
+            abs(mine - theirs) / _frequency_tolerance(theirs, tolerances),
+            abs(mine - theirs),
+            mine,
+            theirs,
+        )
         for mine, theirs in zip(spectrum.mine, spectrum.theirs)
         if theirs > floor
     ]
     assert pairs, f"{identifier}: xtb reports no mode above {floor} cm^-1 to compare"
-    worst, mine, theirs = max(pairs)
-    assert worst < tolerances["frequency_cm1"], (
+    fraction, worst, mine, theirs = max(pairs)
+    assert fraction < 1.0, (
         f"{identifier}: {mine:.3f} cm^-1 against xtb's {theirs:.3f} cm^-1, {worst:.3f} cm^-1 "
-        f"apart over {len(pairs)} modes above the {floor} cm^-1 floor"
+        f"apart against the {_frequency_tolerance(theirs, tolerances):.3f} cm^-1 allowed at "
+        f"that wavenumber, over {len(pairs)} modes above the {floor} cm^-1 floor"
     )
 
 
@@ -618,6 +658,67 @@ def test_some_frequency_reference_has_an_imaginary_mode_below_the_floor(
         "no committed frequency reference has a mode below the floor any more, so "
         "test_the_imaginary_modes_below_the_floor_match_xtb_hess now only ever compares zero "
         "with zero; the set needs a case that is not a minimum"
+    )
+
+
+def test_the_frequency_tolerance_never_loosens_a_mode_above_the_crossover(
+    acceptance_manifest,
+):
+    """Spec 12.3's soft band widens the comparison below the crossover and nowhere else.
+
+    The band exists for one mode in the whole set -- glycine's 62.77 cm^-1, 2.132 cm^-1 out
+    against a flat 2 cm^-1 -- and the way a rule like it goes wrong is by paying for that mode
+    with all the others: a term relative to the wavenumber allows 60 cm^-1 at a 1500 cm^-1
+    mode at 4%. The per-case comparisons cannot catch that, because a looser tolerance only
+    ever makes them pass. So the shape is asserted here instead, on the committed reference
+    wavenumbers rather than on anything a run produces, and this test is the one that fails
+    when the widening reaches the stiff end of the spectrum.
+
+    Measured over the 147 modes above the floor: 143 of them are held to 2.000 cm^-1 exactly,
+    the stiffest (urea's 3584.61 cm^-1) among them, and the loosest comparison anywhere is
+    5.576 cm^-1 at the softest (glycine's 62.77 cm^-1), 2.79 times the flat value.
+    """
+    tolerances = acceptance_manifest["tolerances"]
+    flat = tolerances["frequency_cm1"]
+    floor = tolerances["frequency_floor_cm1"]
+    crossover = tolerances["frequency_soft_crossover_cm1"]
+    assert crossover > floor, (
+        f"the soft band runs from the {floor} cm^-1 floor to the {crossover} cm^-1 crossover "
+        "and is empty, so the widening can never apply to a mode that is compared at all"
+    )
+    assert _frequency_tolerance(crossover, tolerances) == flat, (
+        "the band has to meet the flat tolerance at the crossover; a rule that steps to it "
+        "compares two modes a hair apart in wavenumber by visibly different standards"
+    )
+    compared = sorted(
+        float(value)
+        for case in acceptance_manifest["cases"]
+        if case["kind"] == "frequencies"
+        for value in case["wavenumbers_cm1"][6:]
+        if value > floor
+    )
+    assert compared, "the manifest holds no mode for the frequency comparison to cover"
+    allowed = [_frequency_tolerance(value, tolerances) for value in compared]
+    for value, tolerance in zip(compared, allowed):
+        if value >= crossover:
+            assert tolerance == flat, (
+                f"the {value:.2f} cm^-1 mode is above the {crossover} cm^-1 crossover and is "
+                f"compared at {tolerance:.3f} cm^-1 rather than the flat {flat} cm^-1"
+            )
+        else:
+            assert tolerance > flat, (
+                f"the {value:.2f} cm^-1 mode is inside the soft band and is compared at the "
+                f"flat {flat} cm^-1, so the band does nothing where it is supposed to act"
+            )
+    assert allowed == sorted(allowed, reverse=True), (
+        "a softer mode is never held to a tighter tolerance than a stiffer one, which is the "
+        "whole content of the square-root law the band comes from"
+    )
+    assert max(allowed) < 3.0 * flat, (
+        f"the loosest comparison in the set is {max(allowed):.3f} cm^-1, at the "
+        f"{compared[0]:.2f} cm^-1 mode, which is {max(allowed) / flat:.2f} times the flat "
+        f"{flat} cm^-1; it was 2.79 times when the {crossover} cm^-1 crossover was chosen, "
+        "and a band wider than this stops being a tolerance"
     )
 
 
