@@ -32,7 +32,10 @@ include(FetchContent)
 FetchContent_Declare(
     cmake_openeye
     GIT_REPOSITORY https://github.com/scott-arne/cmake-openeye.git
-    GIT_TAG v1.3.0
+    # TEMPORARY: pinned to cmake-openeye's windows-wheels branch so the Windows job can be
+    # tested before anything is released. GIT_SHALLOW cannot fetch a bare commit, so this is a
+    # branch rather than a SHA. It moves to a release tag once that job has built a wheel.
+    GIT_TAG windows-wheels
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(cmake_openeye)
