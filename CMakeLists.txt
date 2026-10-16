@@ -154,6 +154,11 @@ target_link_libraries(oevibe
     PUBLIC
         OpenEye::OEChem
         OpenEye::OEFF
+        # EngineMolFunc derives from OEMolPotential::OEMolFunc2 and the adapters are built
+        # against OEOpt's optimizers, so both are direct dependencies rather than the
+        # transitive ones they were before (spec 11).
+        OpenEye::OEMolPotential
+        OpenEye::OEOpt
         OpenEye::OEMMFF
         OpenEye::OESmirnoff
         OpenEye::OESheffield

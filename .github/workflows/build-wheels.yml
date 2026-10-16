@@ -22,14 +22,14 @@ jobs:
           - arch: x86_64
             runner: ubuntu-latest
             container: rockylinux:8
-            python: python3.11
+            python: python3.12
             dnf_repo: powertools
             manylinux_plat: manylinux_2_28_x86_64
 
           - arch: aarch64
             runner: ubuntu-24.04-arm
             container: rockylinux:9
-            python: python3.11
+            python: python3.12
             dnf_repo: crb
             manylinux_plat: manylinux_2_34_aarch64
 
@@ -43,7 +43,7 @@ jobs:
           dnf config-manager --set-enabled ${{ matrix.dnf_repo }}
           dnf install -y --allowerasing \
             git curl unzip gcc gcc-c++ cmake ninja-build \
-            python3.11 python3.11-devel \
+            python3.12 python3.12-devel \
             zlib-devel cairo
 
       - uses: actions/checkout@v6
@@ -186,7 +186,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install build dependencies
         run: |
@@ -298,7 +298,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Setup MSVC dev environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -419,7 +419,7 @@ jobs:
       - name: abi3 smoke test under Python 3.13
         run: |
           # Install the wheel into a different Python minor than the build
-          # Python (3.11) to verify the stable-ABI contract actually holds.
+          # Python (3.12) to verify the stable-ABI contract actually holds.
           python -m pip install --upgrade pip
           pip install "openeye-toolkits==${{ vars.OPENEYE_VERSION }}" \
             --extra-index-url https://pypi.anaconda.org/openeye/simple \
